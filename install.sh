@@ -24,6 +24,7 @@ echo "Assembling $DEST..."
 rm -rf "$DEST"
 mkdir -p "$DEST/Contents/MacOS" "$DEST/Contents/Resources"
 cp "$BIN" "$DEST/Contents/MacOS/$EXEC_NAME"
+cp "icon/AppIcon.icns" "$DEST/Contents/Resources/AppIcon.icns"
 
 cat > "$DEST/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -33,6 +34,7 @@ cat > "$DEST/Contents/Info.plist" <<PLIST
     <key>CFBundleName</key>            <string>$DISPLAY_NAME</string>
     <key>CFBundleDisplayName</key>     <string>$DISPLAY_NAME</string>
     <key>CFBundleExecutable</key>      <string>$EXEC_NAME</string>
+    <key>CFBundleIconFile</key>        <string>AppIcon</string>
     <key>CFBundleIdentifier</key>      <string>$BUNDLE_ID</string>
     <key>CFBundlePackageType</key>     <string>APPL</string>
     <key>CFBundleInfoDictionaryVersion</key> <string>6.0</string>
