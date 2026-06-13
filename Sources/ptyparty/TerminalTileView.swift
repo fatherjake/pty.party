@@ -28,7 +28,7 @@ final class TerminalTileView: CanvasTileView {
     override var minSize: NSSize { NSSize(width: 280, height: 180) }
 
     /// What the program in this terminal appears to be doing, inferred from its
-    /// output, and shown as the tile's border color when unfocused.
+    /// output, and shown as the tile's border color.
     enum Activity { case working, asking, idle }
 
     /// True while this tile's terminal has keyboard focus.
@@ -58,6 +58,11 @@ final class TerminalTileView: CanvasTileView {
     private let ports: [ConnectHandleView]
     private var dragTargetsVisible = false
 
+    /// Green ring shown while this tile is selected (focused). Drawn just
+    /// inside the tile so it sits within — and never paints over — the
+    /// activity/status border on the tile's edge.
+    private let selectionLayer = CAShapeLayer()
+
     init(frame frameRect: NSRect, terminalID: String = UUID().uuidString) {
         self.terminalID = terminalID
         terminal = ActivityTerminalView(frame: .zero)
@@ -76,6 +81,12 @@ final class TerminalTileView: CanvasTileView {
         layer?.borderColor = Theme.border.cgColor
         // Match the terminal background so the cell-snapping gap blends in.
         layer?.backgroundColor = NSColor.black.cgColor
+
+        selectionLayer.fillColor = NSColor.clear.cgColor
+        selectionLayer.strokeColor = Theme.green.cgColor
+        selectionLayer.lineWidth = 2
+        selectionLayer.isHidden = true
+        layer?.addSublayer(selectionLayer)
 
         titleBar.tile = self
         titleLabel.font = Theme.mono(12, .medium)
@@ -127,20 +138,17 @@ final class TerminalTileView: CanvasTileView {
 
     deinit { activityTimer?.invalidate() }
 
-    /// Sets the border from focus (green) and, when unfocused, the inferred
-    /// activity: working (green), asking a question (amber), or idle (hairline),
-    /// and keeps the title-bar status pill in sync.
+    /// The edge border always reflects the inferred activity — working (blue),
+    /// asking a question (amber), or idle (hairline) — so the status is never
+    /// hidden. Selection (focus) is shown by a separate green ring just inside
+    /// the border, and the title-bar status pill is kept in sync.
     private func updateBorder() {
         updateStatus()
-        if isFocused {
-            layer?.borderWidth = 2
-            layer?.borderColor = Theme.green.cgColor
-            return
-        }
+        selectionLayer.isHidden = !isFocused
         switch activity {
         case .working:
             layer?.borderWidth = 2
-            layer?.borderColor = Theme.green.withAlphaComponent(0.7).cgColor
+            layer?.borderColor = Theme.blue.withAlphaComponent(0.7).cgColor
         case .asking:
             layer?.borderWidth = 2
             layer?.borderColor = Theme.amber.cgColor
@@ -150,12 +158,12 @@ final class TerminalTileView: CanvasTileView {
         }
     }
 
-    /// Renders the right-side status as a colored dot + label: working (green),
+    /// Renders the right-side status as a colored dot + label: working (blue),
     /// "needs you" (amber) when a question is pending, else idle (dim).
     private func updateStatus() {
         let (text, color): (String, NSColor)
         switch activity {
-        case .working: (text, color) = ("working", Theme.green)
+        case .working: (text, color) = ("working", Theme.blue)
         case .asking: (text, color) = ("needs you", Theme.amber)
         case .idle: (text, color) = ("idle", Theme.textDim)
         }
@@ -225,6 +233,16 @@ final class TerminalTileView: CanvasTileView {
 
     override func layout() {
         super.layout()
+        // Keep the selection ring just inside the edge border, without animating
+        // the path as the tile is live-resized.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        selectionLayer.frame = bounds
+        let ringRect = bounds.insetBy(dx: 4, dy: 4)
+        selectionLayer.path = CGPath(
+            roundedRect: ringRect, cornerWidth: 6, cornerHeight: 6, transform: nil
+        )
+        CATransaction.commit()
         let barHeight = Self.titleBarHeight
         titleBar.frame = NSRect(x: 0, y: 0, width: bounds.width, height: barHeight)
         let lightsWidth: CGFloat = 50

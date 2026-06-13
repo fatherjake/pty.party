@@ -25,6 +25,8 @@ enum Theme {
     static let greenDim = NSColor(srgbRed: 0.44, green: 0.60, blue: 0.47, alpha: 1)
     /// A subtle green wash behind the active row.
     static let greenWash = NSColor(srgbRed: 0.49, green: 0.89, blue: 0.55, alpha: 0.10)
+    /// The blue "working / in progress" signal.
+    static let blue = NSColor(srgbRed: 0.36, green: 0.62, blue: 0.96, alpha: 1)
     /// The amber "needs you / waiting" signal.
     static let amber = NSColor(srgbRed: 0.96, green: 0.78, blue: 0.33, alpha: 1)
     /// A soft red for failures.
