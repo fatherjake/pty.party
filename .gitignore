@@ -1,0 +1,16 @@
+# macOS
+.DS_Store
+
+# SwiftPM build output
+.build/
+*.o
+*.d
+*.swiftdeps
+*.swiftdeps~
+
+# Node (MCP server)
+node_modules/
+
+# Xcode
+*.xcodeproj
+.swiftpm/
