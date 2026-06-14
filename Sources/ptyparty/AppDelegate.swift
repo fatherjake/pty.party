@@ -7,6 +7,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var scrollView: NSScrollView!
     private var sessionBadge: SessionBadgeView!
     private var canvas: CanvasView!
+    private var edgeGlow: EdgeGlowView!
     private var cascadeCount = 0
     private weak var selectedImageTile: ImageTileView?
     private weak var selectedNoteTile: NoteTileView?
@@ -82,6 +83,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         canvas.onContentChanged = { [weak self] in
             self?.scheduleSessionSave()
+            self?.edgeGlow?.refresh()
         }
         publishConnections()  // clear stale connections from a previous run
 
@@ -106,6 +108,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         scrollView.frame = container.bounds
         scrollView.autoresizingMask = [.width, .height]
         container.addSubview(scrollView)
+
+        // A click-through glow layer pinned over the viewport (above the
+        // scrolling canvas) that points toward off-screen working/asking
+        // terminals. It tracks the scroll/zoom of the clip view.
+        edgeGlow = EdgeGlowView(frame: scrollView.frame)
+        edgeGlow.canvas = canvas
+        edgeGlow.autoresizingMask = [.width, .height]
+        container.addSubview(edgeGlow)
+        scrollView.contentView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(
+            forName: NSView.boundsDidChangeNotification,
+            object: scrollView.contentView, queue: .main
+        ) { [weak self] _ in self?.edgeGlow.refresh() }
+
         sessionBadge = SessionBadgeView()
         sessionBadge.onClick = { [weak self] badge in self?.showSessionMenu(from: badge) }
         sessionBadge.autoresizingMask = [.maxXMargin, .minYMargin]  // pin top-left
@@ -550,9 +566,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let terminalID = tile.terminalID
         tile.onClosed = { [weak self] in
             self?.removeActivityFile(for: terminalID)
-            DispatchQueue.main.async { self?.publishConnections() }
+            // After removal (next runloop turn): drop any edge glow this tile
+            // was casting while off-screen, which no activity change clears.
+            DispatchQueue.main.async {
+                self?.publishConnections()
+                self?.edgeGlow?.refresh()
+            }
             self?.scheduleSessionSave()
         }
+        // Repaint the edge glow when this tile starts/stops working or asking.
+        tile.onActivityChanged = { [weak self] in self?.edgeGlow.refresh() }
         canvas.addSubview(tile)
         scheduleSessionSave()
     }

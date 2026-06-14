@@ -53,8 +53,21 @@ final class TerminalTileView: CanvasTileView {
     }
 
     private var activity: Activity = .idle {
-        didSet { if activity != oldValue { updateBorder() } }
+        didSet {
+            if activity != oldValue {
+                updateBorder()
+                onActivityChanged?()
+            }
+        }
     }
+
+    /// The tile's current inferred activity, read by the edge-glow overlay to
+    /// decide whether (and in what color) an off-screen tile should glow.
+    var currentActivity: Activity { activity }
+
+    /// Called whenever the inferred activity changes, so the edge-glow overlay
+    /// can redraw the off-screen indicators.
+    var onActivityChanged: (() -> Void)?
 
     /// True once Claude Code hooks have reported this terminal's state. From
     /// then on the hook events are authoritative and the screen-scraping
