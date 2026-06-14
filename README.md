@@ -1,4 +1,20 @@
-# pty.party
+<p align="center">
+  <img src="icon/AppIcon.png" alt="pty.party logo" width="160">
+</p>
+
+<p align="center"><em>vibe coded</em></p>
+
+<h1 align="center">pty.party</h1>
+
+<p align="center">
+  <a href="https://github.com/fatherjake/pty.party/releases/latest/download/pty.party.zip">
+    <img src="https://img.shields.io/badge/Download-macOS%20app-49d96b?style=for-the-badge&logo=apple&logoColor=white" alt="Download pty.party for macOS">
+  </a>
+  &nbsp;
+  <a href="https://github.com/fatherjake/pty.party/releases/latest">
+    <img src="https://img.shields.io/github/v/release/fatherjake/pty.party?style=for-the-badge&color=49d96b" alt="Latest release">
+  </a>
+</p>
 
 An infinite, zoomable canvas for macOS where AI coding agents and terminals live
 as tiles you can wire together. Drop a **Claude Code** or **Codex** session onto

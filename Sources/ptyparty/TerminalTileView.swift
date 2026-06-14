@@ -211,14 +211,17 @@ final class TerminalTileView: CanvasTileView {
         }
         if needsRescan {
             needsRescan = false
-            settledActivity = Self.classify(visibleScreenText())
+            settledActivity = Self.classify(promptRegion())
         }
         activity = settledActivity
     }
 
-    /// The text currently on screen (the visible rows only, no scrollback), so
-    /// a question that's already been answered and scrolled away isn't matched.
-    private func visibleScreenText() -> String {
+    /// The live-prompt region: the bottom-most non-empty rows of the visible
+    /// screen (newest last), where an interactive CLI anchors its input box,
+    /// menu and footer. Only this slice is classified, so marker words that
+    /// merely appear higher up in the scrollback transcript — e.g. while we're
+    /// discussing them — don't get mistaken for an actual prompt.
+    private func promptRegion(maxLines: Int = 8) -> [String] {
         let term = terminal.getTerminal()
         var lines: [String] = []
         for row in 0..<term.rows {
@@ -226,36 +229,41 @@ final class TerminalTileView: CanvasTileView {
                 lines.append(line.translateToString(trimRight: true))
             }
         }
-        return lines.joined(separator: "\n")
+        while let last = lines.last, last.trimmingCharacters(in: .whitespaces).isEmpty {
+            lines.removeLast()
+        }
+        return Array(lines.suffix(maxLines))
     }
 
-    /// Classifies a settled terminal from its on-screen text. Heuristic and
-    /// shared across Claude, Codex and plain shells, so tweak here if a CLI's
-    /// prompt isn't recognized. We match only the *interactive* prompt markers
-    /// (a numbered/highlighted choice or a y/n prompt), which disappear once
-    /// answered — not lingering printed text like "Do you want…", which would
-    /// keep a finished terminal red.
-    private static func classify(_ text: String) -> Activity {
-        let lower = text.lowercased()
+    /// Classifies a settled terminal from its bottom prompt region. Heuristic
+    /// and shared across Claude, Codex and plain shells, so tweak here if a
+    /// CLI's prompt isn't recognized. We match only the *interactive* prompt
+    /// markers (a numbered/highlighted choice or a y/n prompt), which disappear
+    /// once answered — not lingering printed text like "Do you want…".
+    private static func classify(_ region: [String]) -> Activity {
+        let lower = region.map { $0.lowercased() }
+        let blob = lower.joined(separator: "\n")
         // Both Claude and Codex show an interrupt hint while thinking, even
         // when they briefly pause emitting output — still working.
-        if lower.contains("esc to interrupt") || lower.contains("ctrl+t to") {
+        if blob.contains("esc to interrupt") || blob.contains("ctrl+t to") {
             return .working
         }
-        // An interactive picker awaiting a choice shows a live navigation /
-        // selection footer that disappears once answered. This catches the menu
-        // regardless of the pointer glyph or which row is highlighted.
-        if lower.contains("to navigate") || lower.contains("enter to select") {
+        // A picker's navigation/selection footer is the bottom-most line(s) of
+        // the prompt, so only check the last couple — that keeps prose that
+        // merely mentions these words (like this very conversation) from
+        // flipping the tile to "needs you".
+        let footer = lower.suffix(2).joined(separator: " ")
+        if footer.contains("to navigate") || footer.contains("enter to select") {
             return .asking
         }
-        // A y/n confirmation prompt.
-        if ["(y/n)", "[y/n]", "(yes/no)"].contains(where: { lower.contains($0) }) {
+        // A y/n confirmation prompt, within the bottom region.
+        if ["(y/n)", "[y/n]", "(yes/no)"].contains(where: { blob.contains($0) }) {
             return .asking
         }
         // A highlighted choice: a pointer glyph at the start of a line followed
         // by a numbered or yes/no option — any selected row, not just "1.".
         let pointers: Set<Character> = ["❯", "›", "‣", "→", "▶"]
-        for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
+        for rawLine in region {
             let line = rawLine.drop { $0 == " " || $0 == "\t" }
             guard let first = line.first, pointers.contains(first) else { continue }
             let rest = line.dropFirst().drop { $0 == " " || $0 == "\t" }
