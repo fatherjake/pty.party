@@ -2,7 +2,7 @@
   <img src="icon/AppIcon.png" alt="pty.party logo" width="160">
 </p>
 
-<p align="center"><em>vibe coded</em></p>
+<p align="center"><em>vibe coded in pty.party</em></p>
 
 <h1 align="center">pty.party</h1>
 
