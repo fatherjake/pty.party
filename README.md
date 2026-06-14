@@ -182,6 +182,11 @@ calls show up immediately.
 - **Paste or drop** an image to drop it onto the canvas.
 - **Connect** tiles by dragging from an edge port / corner handle onto another
   tile.
+- **Off-screen status glows** — scroll a busy terminal out of view and a soft
+  ambient glow appears on the edge pointing toward it (blue while working, amber
+  when it needs you). It blooms into a tall column as the tile leaves and
+  contracts to a small spot as it drifts further away, so you can tell at a
+  glance where an agent that wants attention has gone.
 
 Common shortcuts:
 
