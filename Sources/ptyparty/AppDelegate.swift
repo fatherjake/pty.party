@@ -1183,8 +1183,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return SessionStore.create(name: "My Canvas")
         }
         // Open the last-used session directly. The session badge's dropdown is
-        // now the way to switch sessions, so a forced launch picker would be
-        // redundant. (Open Session… in the menu still shows the full picker.)
+        // the way to switch sessions, so a forced launch picker would be
+        // redundant.
         if let lastID = SessionStore.lastOpenedID,
            let last = existing.first(where: { $0.id == lastID }) {
             return last
@@ -1232,6 +1232,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let renameItem = NSMenuItem(title: "Rename Session…", action: #selector(renameSession(_:)), keyEquivalent: "")
         renameItem.target = self
         menu.addItem(renameItem)
+        let deleteItem = NSMenuItem(title: "Delete Session…", action: #selector(deleteSession(_:)), keyEquivalent: "")
+        deleteItem.target = self
+        menu.addItem(deleteItem)
         // Anchor just below the badge's bottom-left corner.
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: -4), in: badge)
     }
@@ -1248,11 +1251,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         switchTo(SessionStore.create(name: name))
     }
 
-    @objc func openSession(_ sender: Any?) {
-        guard let chosen = SessionPicker().run(allowCancel: true) else { return }
-        switchTo(chosen)
-    }
-
     @objc func renameSession(_ sender: Any?) {
         guard currentSession != nil,
               let name = promptForSessionName(title: "Rename Session", initial: currentSession.name)
@@ -1260,6 +1258,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         SessionStore.rename(currentSession, to: name)
         currentSession.name = name
         updateWindowTitle()
+    }
+
+    /// Deletes the currently loaded session after a type-the-name confirmation,
+    /// then loads the next most-recent session — or a fresh canvas if this was
+    /// the last one.
+    @objc func deleteSession(_ sender: Any?) {
+        guard let doomed = currentSession, confirmDeletion(of: doomed) else { return }
+
+        // Decide what to load before dropping the folder: the newest other
+        // session, or a brand-new empty canvas if none remain.
+        let survivors = SessionStore.list().filter { $0.id != doomed.id }
+        let next = survivors.first ?? SessionStore.create(name: "My Canvas")
+
+        // Suppress saves while tearing down so the doomed session isn't rewritten.
+        sessionSaveTimer?.invalidate()
+        isSwitchingSession = true
+        teardownCanvas()
+        SessionStore.delete(doomed)
+        currentSession = next
+        isSwitchingSession = false
+
+        SessionStore.lastOpenedID = next.id
+        updateWindowTitle()
+        publishConnections()  // the canvas is empty until restore repopulates it
+        if !restoreSession() {
+            addClaudeTerminal(at: visibleCenter())
+        }
+    }
+
+    /// A destructive confirmation that only arms its Delete button once the
+    /// exact session name is typed. Returns true if the user confirmed.
+    private func confirmDeletion(of session: SessionStore.Info) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "Delete “\(session.name)”?"
+        alert.informativeText = "This permanently removes the session and its saved images. Running terminals are not affected.\n\nType the session name to confirm."
+        let deleteButton = alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Cancel")
+        alert.alertStyle = .warning
+        deleteButton.hasDestructiveAction = true
+        deleteButton.isEnabled = false
+
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        field.placeholderString = session.name
+        let delegate = ConfirmMatchFieldDelegate(required: session.name, armedButton: deleteButton)
+        field.delegate = delegate
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+
+        let confirmed = alert.runModal() == .alertFirstButtonReturn
+        _ = delegate  // keep the field's delegate alive through the modal
+        return confirmed
     }
 
     private func promptForSessionName(title: String, initial: String) -> String? {
@@ -1710,15 +1759,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         newSessionItem.keyEquivalentModifierMask = [.command, .shift]
         sessionMenu.addItem(newSessionItem)
-        let openSessionItem = NSMenuItem(
-            title: "Open Session…",
-            action: #selector(openSession(_:)),
-            keyEquivalent: "o"
-        )
-        openSessionItem.keyEquivalentModifierMask = [.command, .shift]
-        sessionMenu.addItem(openSessionItem)
         sessionMenu.addItem(.separator())
         sessionMenu.addItem(withTitle: "Rename Session…", action: #selector(renameSession(_:)), keyEquivalent: "")
+        sessionMenu.addItem(withTitle: "Delete Session…", action: #selector(deleteSession(_:)), keyEquivalent: "")
         sessionMenuItem.submenu = sessionMenu
 
         let editMenuItem = NSMenuItem()
@@ -1739,5 +1782,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         viewMenuItem.submenu = viewMenu
 
         NSApp.mainMenu = mainMenu
+    }
+}
+
+/// Enables a button only while a text field's trimmed contents exactly match a
+/// required string — the "type the name to confirm" gate for destructive
+/// actions. The owner keeps a strong reference for the lifetime of the dialog.
+private final class ConfirmMatchFieldDelegate: NSObject, NSTextFieldDelegate {
+    private let required: String
+    private weak var armedButton: NSButton?
+
+    init(required: String, armedButton: NSButton) {
+        self.required = required
+        self.armedButton = armedButton
+    }
+
+    func controlTextDidChange(_ notification: Notification) {
+        guard let field = notification.object as? NSTextField else { return }
+        let typed = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        armedButton?.isEnabled = typed == required
     }
 }
