@@ -690,8 +690,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             "Stop": [group(matcher: nil, state: "idle")],
             "Notification": [
                 group(matcher: "permission_prompt", state: "asking"),
-                group(matcher: "idle_prompt", state: "asking"),
                 group(matcher: "elicitation_dialog", state: "asking"),
+                // "Done, waiting for your next prompt" is the idle/done state, not
+                // a decision you owe the agent — and it doubles as recovery from a
+                // stuck "working" tile after an interrupt, where Stop never fires.
+                group(matcher: "idle_prompt", state: "idle"),
             ],
         ]
         for (event, groups) in ours {

@@ -13,7 +13,7 @@
       {
         "hooks" : [
           {
-            "command" : "[ -n \"$PTYPARTY_TERMINAL_ID\" ] && { d=\"$HOME/Library/Application Support/ptyparty/activity\"; mkdir -p \"$d\"; printf %s asking > \"$d/.$PTYPARTY_TERMINAL_ID\" && mv \"$d/.$PTYPARTY_TERMINAL_ID\" \"$d/$PTYPARTY_TERMINAL_ID\"; }",
+            "command" : "[ -n \"$PTYPARTY_TERMINAL_ID\" ] && { d=\"$HOME/Library/Application Support/ptyparty/activity\"; mkdir -p \"$d\"; printf %s idle > \"$d/.$PTYPARTY_TERMINAL_ID\" && mv \"$d/.$PTYPARTY_TERMINAL_ID\" \"$d/$PTYPARTY_TERMINAL_ID\"; }",
             "type" : "command"
           }
         ],
