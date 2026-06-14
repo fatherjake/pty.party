@@ -58,10 +58,14 @@ final class TerminalTileView: CanvasTileView {
     private let ports: [ConnectHandleView]
     private var dragTargetsVisible = false
 
-    /// Green ring shown while this tile is selected (focused). Drawn just
-    /// inside the tile so it sits within — and never paints over — the
-    /// activity/status border on the tile's edge.
+    /// Green ring shown while this tile is selected (focused). Drawn at the
+    /// tile's outer edge so it sits *outside* the activity/status border.
     private let selectionLayer = CAShapeLayer()
+
+    /// Colored activity/status border (working = blue, asking = amber), drawn
+    /// as an inset ring so the selection ring can sit outside it. Hidden when
+    /// idle, where the tile's plain hairline edge shows instead.
+    private let activityLayer = CAShapeLayer()
 
     init(frame frameRect: NSRect, terminalID: String = UUID().uuidString) {
         self.terminalID = terminalID
@@ -82,10 +86,20 @@ final class TerminalTileView: CanvasTileView {
         // Match the terminal background so the cell-snapping gap blends in.
         layer?.backgroundColor = NSColor.black.cgColor
 
+        // The border rings sit above the title-bar and terminal subview layers
+        // (added below) via zPosition, so an opaque subview can't paint over the
+        // ring along the top edge — selection above activity.
+        activityLayer.fillColor = NSColor.clear.cgColor
+        activityLayer.lineWidth = 4
+        activityLayer.isHidden = true
+        activityLayer.zPosition = 1
+        layer?.addSublayer(activityLayer)
+
         selectionLayer.fillColor = NSColor.clear.cgColor
         selectionLayer.strokeColor = Theme.green.cgColor
         selectionLayer.lineWidth = 2
         selectionLayer.isHidden = true
+        selectionLayer.zPosition = 2
         layer?.addSublayer(selectionLayer)
 
         titleBar.tile = self
@@ -123,6 +137,10 @@ final class TerminalTileView: CanvasTileView {
             port.toolTip = "Drag to another terminal to connect them"
             port.isHidden = true
             addSubview(port)
+            // Keep ports above the border rings (zPosition 1–2) so the activity
+            // ring doesn't cut across them when the tile is focused.
+            port.wantsLayer = true
+            port.layer?.zPosition = 3
         }
 
         updateBorder()
@@ -138,23 +156,27 @@ final class TerminalTileView: CanvasTileView {
 
     deinit { activityTimer?.invalidate() }
 
-    /// The edge border always reflects the inferred activity — working (blue),
-    /// asking a question (amber), or idle (hairline) — so the status is never
-    /// hidden. Selection (focus) is shown by a separate green ring just inside
-    /// the border, and the title-bar status pill is kept in sync.
+    /// The inset activity ring reflects the inferred activity — working (blue)
+    /// or asking a question (amber) — so the status is never hidden; idle shows
+    /// only the tile's plain hairline edge. Selection (focus) is shown by a
+    /// separate green ring at the outer edge, *outside* the activity ring, and
+    /// the title-bar status pill is kept in sync.
     private func updateBorder() {
         updateStatus()
         selectionLayer.isHidden = !isFocused
+        // Drop the neutral hairline while focused so the green ring is the
+        // outermost edge.
+        layer?.borderWidth = isFocused ? 0 : 1
+        layer?.borderColor = Theme.border.cgColor
         switch activity {
         case .working:
-            layer?.borderWidth = 2
-            layer?.borderColor = Theme.blue.withAlphaComponent(0.7).cgColor
+            activityLayer.isHidden = false
+            activityLayer.strokeColor = Theme.blue.withAlphaComponent(0.7).cgColor
         case .asking:
-            layer?.borderWidth = 2
-            layer?.borderColor = Theme.amber.cgColor
+            activityLayer.isHidden = false
+            activityLayer.strokeColor = Theme.amber.cgColor
         case .idle:
-            layer?.borderWidth = 1
-            layer?.borderColor = Theme.border.cgColor
+            activityLayer.isHidden = true
         }
     }
 
@@ -220,27 +242,47 @@ final class TerminalTileView: CanvasTileView {
         if lower.contains("esc to interrupt") || lower.contains("ctrl+t to") {
             return .working
         }
-        let askingHints = [
-            "❯ 1.", "› 1.", "‣ 1.",   // a highlighted numbered choice
-            "❯ yes", "› yes",          // a highlighted yes/no choice
-            "(y/n)", "[y/n]", "(yes/no)",
-        ]
-        if askingHints.contains(where: { lower.contains($0) }) {
+        // An interactive picker awaiting a choice shows a live navigation /
+        // selection footer that disappears once answered. This catches the menu
+        // regardless of the pointer glyph or which row is highlighted.
+        if lower.contains("to navigate") || lower.contains("enter to select") {
             return .asking
+        }
+        // A y/n confirmation prompt.
+        if ["(y/n)", "[y/n]", "(yes/no)"].contains(where: { lower.contains($0) }) {
+            return .asking
+        }
+        // A highlighted choice: a pointer glyph at the start of a line followed
+        // by a numbered or yes/no option — any selected row, not just "1.".
+        let pointers: Set<Character> = ["❯", "›", "‣", "→", "▶"]
+        for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = rawLine.drop { $0 == " " || $0 == "\t" }
+            guard let first = line.first, pointers.contains(first) else { continue }
+            let rest = line.dropFirst().drop { $0 == " " || $0 == "\t" }
+            if rest.first?.isNumber == true { return .asking }
+            let restLower = rest.lowercased()
+            if restLower.hasPrefix("yes") || restLower.hasPrefix("no") { return .asking }
         }
         return .idle
     }
 
     override func layout() {
         super.layout()
-        // Keep the selection ring just inside the edge border, without animating
-        // the path as the tile is live-resized.
+        // The green selection ring hugs the outer edge; the colored activity
+        // ring sits inset inside it. Both stay within the clipped bounds, so
+        // selection reads as the outer highlight. Don't animate the paths as
+        // the tile is live-resized.
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         selectionLayer.frame = bounds
-        let ringRect = bounds.insetBy(dx: 4, dy: 4)
+        let selectionRect = bounds.insetBy(dx: 2, dy: 2)
         selectionLayer.path = CGPath(
-            roundedRect: ringRect, cornerWidth: 6, cornerHeight: 6, transform: nil
+            roundedRect: selectionRect, cornerWidth: 8, cornerHeight: 8, transform: nil
+        )
+        activityLayer.frame = bounds
+        let activityRect = bounds.insetBy(dx: 7, dy: 7)
+        activityLayer.path = CGPath(
+            roundedRect: activityRect, cornerWidth: 5, cornerHeight: 5, transform: nil
         )
         CATransaction.commit()
         let barHeight = Self.titleBarHeight

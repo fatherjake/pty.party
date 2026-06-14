@@ -165,6 +165,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !restoreSession() {
             addClaudeTerminal(at: visibleCenter())
         }
+
+        // Greet first-time users with the onboarding card (reopenable from the
+        // File menu thereafter).
+        if !UserDefaults.standard.bool(forKey: Self.hasSeenWelcomeKey) {
+            UserDefaults.standard.set(true, forKey: Self.hasSeenWelcomeKey)
+            addWelcomeTile()
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -289,12 +296,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // image — unless a terminal has keyboard focus, where those
             // keys belong to the shell.
             guard event.keyCode == 51 || event.keyCode == 117,
-                  selectedImageTile != nil || selectedNoteTile != nil else { return event }
+                  selectedImageTile != nil || selectedNoteTile != nil
+                    || canvas.selectedConnector != nil else { return event }
             let responderView = window.firstResponder as? NSView
             let terminalFocused = responderView.map { view in
                 sequence(first: view, next: { $0.superview }).contains { $0 is TerminalTileView }
             } ?? false
             if terminalFocused { return event }
+            canvas.deleteSelectedConnector()
             selectedImageTile?.close()
             selectedNoteTile?.close()
             return nil
@@ -324,6 +333,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 $0 is CanvasTileView && $0.frame.contains(point)
             }) as? CanvasTileView {
                 tile.bringToFront()
+                canvas.selectConnector(nil)
                 if let imageTile = tile as? ImageTileView {
                     selectImageTile(imageTile)
                     window.makeFirstResponder(nil)  // take keyboard focus off any terminal
@@ -333,9 +343,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 // A terminal click keeps the current selection, so you can
                 // select a tile and then type to Claude about it.
+            } else if let connector = canvas.connector(at: point) {
+                // Clicking a connection line (between tiles, over bare canvas)
+                // selects it so backspace can remove it.
+                canvas.selectConnector(connector)
+                selectImageTile(nil)
+                selectNoteTile(nil)
+                window.makeFirstResponder(nil)
+                return nil  // don't start panning off a connector click
             } else {
                 selectImageTile(nil)
                 selectNoteTile(nil)
+                canvas.selectConnector(nil)
                 window.makeFirstResponder(nil)  // clicking empty canvas defocuses terminals
                 // Clicking bare canvas (inside the scroll area, not a tile)
                 // grabs it for hand-panning, FigJam-style.
@@ -521,6 +540,200 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         canvas.addSubview(tile)
         scheduleSessionSave()
+    }
+
+    // MARK: - Welcome & project setup
+
+    /// Tracks whether the onboarding card has been shown automatically.
+    private static let hasSeenWelcomeKey = "hasSeenWelcome"
+
+    @objc func showWelcome(_ sender: Any?) {
+        addWelcomeTile()
+    }
+
+    /// Drops a transient onboarding card on the canvas. It isn't persisted to
+    /// the session — it just lives until closed or the next relaunch.
+    private func addWelcomeTile() {
+        // Reuse an existing card rather than stacking duplicates.
+        if let existing = canvas.subviews.compactMap({ $0 as? WelcomeTileView }).first {
+            existing.bringToFront()
+            return
+        }
+        let size = WelcomeTileView.defaultSize
+        let center = cascadedVisibleCenter()
+        let origin = NSPoint(x: center.x - size.width / 2, y: center.y - size.height / 2)
+        let tile = WelcomeTileView(frame: NSRect(origin: origin, size: size))
+        tile.onInstall = { [weak self, weak tile] in self?.runProjectSetup(card: tile) }
+        canvas.addSubview(tile)  // not persisted: no scheduleSessionSave()
+
+        // If the project is already set up, open straight into the done state.
+        let target = workingDirectory
+        if target != NSHomeDirectory() {
+            let status = projectSetupStatus(in: target)
+            if status.complete { tile.showComplete(status.lines) }
+        }
+    }
+
+    /// Installs the ptyparty skill + PARTY.md into the user's project and points
+    /// its AGENTS.md/CLAUDE.md at PARTY.md. Driven by the Welcome card's button.
+    private func runProjectSetup(card: WelcomeTileView?) {
+        // The target is the session's working folder; never write into ~, so
+        // prompt for a real project folder when none is set.
+        guard let target = resolveProjectFolder() else { return }
+        let fileManager = FileManager.default
+        var summary: [String] = []
+
+        // 1. Skill — into a `skills` folder found in the project, or one the
+        //    user chooses when none exists.
+        if let skillsDir = findSkillsFolder(in: target) ?? promptForSkillsFolder(in: target) {
+            let skillDir = skillsDir.appendingPathComponent("ptyparty", isDirectory: true)
+            do {
+                try fileManager.createDirectory(at: skillDir, withIntermediateDirectories: true)
+                try OnboardingContent.skillMarkdown.write(
+                    to: skillDir.appendingPathComponent("SKILL.md"),
+                    atomically: true, encoding: .utf8
+                )
+                summary.append("• Skill → \(displayPath(skillDir.appendingPathComponent("SKILL.md")))")
+            } catch {
+                summary.append("• Skill failed: \(error.localizedDescription)")
+            }
+        } else {
+            summary.append("• Skill skipped (no skills folder chosen)")
+        }
+
+        // 2. PARTY.md at the project root.
+        let partyURL = URL(fileURLWithPath: target).appendingPathComponent("PARTY.md")
+        do {
+            try OnboardingContent.partyMarkdown.write(to: partyURL, atomically: true, encoding: .utf8)
+            summary.append("• \(displayPath(partyURL))")
+        } catch {
+            summary.append("• PARTY.md failed: \(error.localizedDescription)")
+        }
+
+        // 3. Point AGENTS.md (preferred) or CLAUDE.md at PARTY.md.
+        summary.append("• \(addPointerLine(in: target))")
+
+        // Show the result inline on the card rather than a separate dialog.
+        card?.showComplete(summary)
+    }
+
+    /// Whether the project at `target` already has PARTY.md, a pointer line, and
+    /// the ptyparty skill installed, plus user-facing lines describing each.
+    private func projectSetupStatus(in target: String) -> (complete: Bool, lines: [String]) {
+        let fileManager = FileManager.default
+        let rootURL = URL(fileURLWithPath: target)
+        var lines: [String] = []
+
+        let partyURL = rootURL.appendingPathComponent("PARTY.md")
+        let partyExists = fileManager.fileExists(atPath: partyURL.path)
+        lines.append(partyExists ? "• \(displayPath(partyURL))" : "• PARTY.md not installed")
+
+        let pointerHost = ["AGENTS.md", "CLAUDE.md"]
+            .map { rootURL.appendingPathComponent($0) }
+            .first { url in
+                guard let content = try? String(contentsOf: url, encoding: .utf8) else { return false }
+                return content.contains(OnboardingContent.pointerLine)
+            }
+        lines.append(pointerHost.map { "• \($0.lastPathComponent) points at PARTY.md" }
+            ?? "• AGENTS.md/CLAUDE.md not pointing at PARTY.md")
+
+        let skillURL = installedSkillURL(in: target)
+        lines.append(skillURL.map { "• Skill → \(displayPath($0))" }
+            ?? "• ptyparty skill not installed")
+
+        return (partyExists && pointerHost != nil && skillURL != nil, lines)
+    }
+
+    /// The installed `ptyparty/SKILL.md`, if a `skills` folder in the project
+    /// already contains it.
+    private func installedSkillURL(in target: String) -> URL? {
+        guard let skillsDir = findSkillsFolder(in: target) else { return nil }
+        let url = skillsDir.appendingPathComponent("ptyparty/SKILL.md")
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
+
+    /// The folder to install into: the working folder, or one the user picks
+    /// when it's unset/home. Returns nil if the user cancels the picker.
+    private func resolveProjectFolder() -> String? {
+        let current = workingDirectory
+        if current != NSHomeDirectory() { return current }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Use Folder"
+        panel.message = "Choose the project to set up for pty.party."
+        guard panel.runModal() == .OK, let url = panel.url else { return nil }
+        workingDirectory = url.path  // adopt it as the session's working folder
+        return url.path
+    }
+
+    /// Searches `root` for a directory named `skills`, skipping heavy folders and
+    /// capping depth. Returns the first match (shallowest wins).
+    private func findSkillsFolder(in root: String) -> URL? {
+        let skip: Set<String> = ["node_modules", ".git", ".build", "dist", "build", "Pods", ".next"]
+        let rootURL = URL(fileURLWithPath: root)
+        var queue: [(url: URL, depth: Int)] = [(rootURL, 0)]
+        let maxDepth = 4
+        while !queue.isEmpty {
+            let (dir, depth) = queue.removeFirst()
+            let entries = (try? FileManager.default.contentsOfDirectory(
+                at: dir, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]
+            )) ?? []
+            for entry in entries {
+                guard (try? entry.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true
+                else { continue }
+                let name = entry.lastPathComponent
+                if name == "skills" { return entry }
+                if depth < maxDepth, !skip.contains(name) {
+                    queue.append((entry, depth + 1))
+                }
+            }
+        }
+        return nil
+    }
+
+    /// Asks the user to choose or create a skills folder when none was found.
+    private func promptForSkillsFolder(in root: String) -> URL? {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = URL(fileURLWithPath: root)
+        panel.prompt = "Use Folder"
+        panel.message = "No 'skills' folder found. Choose or create one for the ptyparty skill."
+        return panel.runModal() == .OK ? panel.url : nil
+    }
+
+    /// Prepends the PARTY.md pointer line to AGENTS.md (preferred) or CLAUDE.md,
+    /// creating AGENTS.md if neither exists. Idempotent. Returns a status line.
+    private func addPointerLine(in root: String) -> String {
+        let fileManager = FileManager.default
+        let rootURL = URL(fileURLWithPath: root)
+        let line = OnboardingContent.pointerLine
+        let target = ["AGENTS.md", "CLAUDE.md"]
+            .map { rootURL.appendingPathComponent($0) }
+            .first { fileManager.fileExists(atPath: $0.path) }
+            ?? rootURL.appendingPathComponent("AGENTS.md")
+
+        let existing = (try? String(contentsOf: target, encoding: .utf8)) ?? ""
+        if existing.contains(line) {
+            return "\(target.lastPathComponent) already points at PARTY.md"
+        }
+        let updated = existing.isEmpty ? "\(line)\n" : "\(line)\n\n\(existing)"
+        do {
+            try updated.write(to: target, atomically: true, encoding: .utf8)
+            return "\(target.lastPathComponent) now points at PARTY.md"
+        } catch {
+            return "\(target.lastPathComponent) update failed: \(error.localizedDescription)"
+        }
+    }
+
+    /// A tilde-abbreviated path for user-facing messages.
+    private func displayPath(_ url: URL) -> String {
+        (url.path as NSString).abbreviatingWithTildeInPath
     }
 
     // MARK: - Command runners
@@ -1344,6 +1557,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         fileMenu.addItem(logItem)
         fileMenu.addItem(.separator())
         fileMenu.addItem(withTitle: "Set Working Folder…", action: #selector(chooseWorkingDirectory(_:)), keyEquivalent: "o")
+        fileMenu.addItem(withTitle: "Set Up Project…", action: #selector(showWelcome(_:)), keyEquivalent: "")
         fileMenu.addItem(.separator())
         fileMenu.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         fileMenuItem.submenu = fileMenu

@@ -44,20 +44,52 @@ final class CanvasView: NSView {
 
     private(set) var noteConnections: [NoteConnection] = []
 
-    /// The line being dragged out from an image's connect handle. While set,
-    /// terminals show their target ports and the nearest one lights up.
-    var pendingLine: (from: NSPoint, to: NSPoint)? {
+    /// A stable identity for a drawn connector, so the same link can be
+    /// hit-tested, highlighted and deleted regardless of array order.
+    /// Terminal-to-terminal links are undirected, so their endpoints compare
+    /// either way round.
+    struct ConnectorID: Equatable {
+        enum Kind { case image, note, terminal }
+        let kind: Kind
+        let a: ObjectIdentifier
+        let b: ObjectIdentifier
+
+        static func == (lhs: ConnectorID, rhs: ConnectorID) -> Bool {
+            guard lhs.kind == rhs.kind else { return false }
+            if lhs.a == rhs.a && lhs.b == rhs.b { return true }
+            return lhs.kind == .terminal && lhs.a == rhs.b && lhs.b == rhs.a
+        }
+    }
+
+    /// The connector the user has clicked: drawn dotted and removable with
+    /// backspace. Transient UI state, never persisted.
+    private(set) var selectedConnector: ConnectorID?
+
+    /// The line being dragged out from a tile's connect handle. While set,
+    /// the valid drop targets show their ports and the nearest one lights up.
+    /// A Log (note) is a valid target only for a terminal's line, since you
+    /// connect a Log to a terminal, never to another note.
+    var pendingLine: (from: NSPoint, to: NSPoint, source: CanvasTileView?)? {
         didSet {
             let dragging = pendingLine != nil
+            let notesAreTargets = pendingLine?.source is TerminalTileView
             if dragging != (oldValue != nil) {
                 for case let terminal as TerminalTileView in subviews {
                     terminal.setConnectionTargets(visible: dragging)
+                }
+                for case let note as NoteTileView in subviews {
+                    note.setConnectionTargets(visible: dragging && notesAreTargets)
                 }
             }
             let dragPoint = pendingLine?.to
             for case let terminal as TerminalTileView in subviews {
                 let pointIfHovered = dragPoint.flatMap { terminal.frame.contains($0) ? $0 : nil }
                 terminal.highlightConnectionTarget(near: pointIfHovered)
+            }
+            for case let note as NoteTileView in subviews {
+                let pointIfHovered = (notesAreTargets ? dragPoint : nil)
+                    .flatMap { note.frame.contains($0) ? $0 : nil }
+                note.highlightConnectionTarget(near: pointIfHovered)
             }
             refreshConnections()
         }
@@ -127,8 +159,116 @@ final class CanvasView: NSView {
         connections.removeAll()
         terminalConnections.removeAll()
         noteConnections.removeAll()
+        selectedConnector = nil
         pendingLine = nil
         refreshConnections()
+    }
+
+    /// A drawn connector: its identity, its endpoints on screen, and whether
+    /// it renders dashed at rest. The overlay draws from this and hit-testing
+    /// reads from it, so the line you see is exactly the line you can click.
+    struct ConnectorSegment {
+        let id: ConnectorID
+        let from: NSPoint
+        let to: NSPoint
+        let dashed: Bool
+    }
+
+    /// Every connector currently on the canvas, computed the same way the
+    /// overlay draws them. Skips links whose endpoints have gone away.
+    func connectorSegments() -> [ConnectorSegment] {
+        var segments: [ConnectorSegment] = []
+        for connection in connections {
+            guard let image = connection.image, let terminal = connection.terminal,
+                  image.superview === self, terminal.superview === self else { continue }
+            let terminalCenter = NSPoint(x: terminal.frame.midX, y: terminal.frame.midY)
+            let from = image.connectionAnchor(toward: terminalCenter)
+            let to = terminal.connectionAnchor(toward: from)
+            segments.append(ConnectorSegment(
+                id: ConnectorID(kind: .image, a: ObjectIdentifier(image), b: ObjectIdentifier(terminal)),
+                from: from, to: to, dashed: false))
+        }
+        for connection in noteConnections {
+            guard let note = connection.note, let terminal = connection.terminal,
+                  note.superview === self, terminal.superview === self else { continue }
+            let terminalCenter = NSPoint(x: terminal.frame.midX, y: terminal.frame.midY)
+            let from = note.connectionAnchor(toward: terminalCenter)
+            let to = terminal.connectionAnchor(toward: from)
+            segments.append(ConnectorSegment(
+                id: ConnectorID(kind: .note, a: ObjectIdentifier(note), b: ObjectIdentifier(terminal)),
+                from: from, to: to, dashed: false))
+        }
+        for link in terminalConnections {
+            guard let first = link.first, let second = link.second,
+                  first.superview === self, second.superview === self else { continue }
+            let secondCenter = NSPoint(x: second.frame.midX, y: second.frame.midY)
+            let from = first.connectionAnchor(toward: secondCenter)
+            let to = second.connectionAnchor(toward: from)
+            segments.append(ConnectorSegment(
+                id: ConnectorID(kind: .terminal, a: ObjectIdentifier(first), b: ObjectIdentifier(second)),
+                from: from, to: to, dashed: true))
+        }
+        return segments
+    }
+
+    /// The connector nearest `point`, if one runs within grabbing distance.
+    /// Lets a click land a connection even though the lines are hairline-thin.
+    func connector(at point: NSPoint) -> ConnectorID? {
+        let threshold: CGFloat = 8
+        var best: (id: ConnectorID, distance: CGFloat)?
+        for segment in connectorSegments() {
+            let distance = Self.distance(from: point, toSegment: segment.from, segment.to)
+            guard distance <= threshold else { continue }
+            if best == nil || distance < best!.distance {
+                best = (segment.id, distance)
+            }
+        }
+        return best?.id
+    }
+
+    /// Selects a connector (or clears the selection), redrawing the overlay.
+    /// Selection isn't persisted, so this deliberately skips onContentChanged.
+    func selectConnector(_ id: ConnectorID?) {
+        guard selectedConnector != id else { return }
+        selectedConnector = id
+        connectionOverlay.needsDisplay = true
+    }
+
+    /// Removes the selected connector, whatever its kind, and clears the
+    /// selection. Mirrors the toggle* methods so connected state stays in sync.
+    func deleteSelectedConnector() {
+        guard let id = selectedConnector else { return }
+        switch id.kind {
+        case .image:
+            connections.removeAll {
+                guard let image = $0.image, let terminal = $0.terminal else { return false }
+                return ConnectorID(kind: .image, a: ObjectIdentifier(image), b: ObjectIdentifier(terminal)) == id
+            }
+        case .note:
+            noteConnections.removeAll {
+                guard let note = $0.note, let terminal = $0.terminal else { return false }
+                return ConnectorID(kind: .note, a: ObjectIdentifier(note), b: ObjectIdentifier(terminal)) == id
+            }
+        case .terminal:
+            terminalConnections.removeAll {
+                guard let first = $0.first, let second = $0.second else { return false }
+                return ConnectorID(kind: .terminal, a: ObjectIdentifier(first), b: ObjectIdentifier(second)) == id
+            }
+        }
+        selectedConnector = nil
+        refreshConnections()
+        onConnectionsChanged?()
+    }
+
+    /// Shortest distance from `p` to the line segment `a`–`b`.
+    private static func distance(from p: NSPoint, toSegment a: NSPoint, _ b: NSPoint) -> CGFloat {
+        let dx = b.x - a.x
+        let dy = b.y - a.y
+        let lengthSquared = dx * dx + dy * dy
+        guard lengthSquared > 0 else { return hypot(p.x - a.x, p.y - a.y) }
+        var t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / lengthSquared
+        t = max(0, min(1, t))
+        return hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy))
     }
 
     func pruneConnections() {
@@ -209,6 +349,13 @@ final class CanvasView: NSView {
         subviews.reversed().first {
             $0 is TerminalTileView && $0.frame.contains(point)
         } as? TerminalTileView
+    }
+
+    /// The topmost note (Log) tile under `point`, if any.
+    func noteTile(at point: NSPoint) -> NoteTileView? {
+        subviews.reversed().first {
+            $0 is NoteTileView && $0.frame.contains(point)
+        } as? NoteTileView
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -301,50 +448,48 @@ final class ConnectionOverlayView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         guard let canvas else { return }
-        for connection in canvas.connections {
-            guard let image = connection.image, let terminal = connection.terminal,
-                  image.superview === canvas, terminal.superview === canvas else { continue }
-            let terminalCenter = NSPoint(x: terminal.frame.midX, y: terminal.frame.midY)
-            let from = image.connectionAnchor(toward: terminalCenter)
-            let to = terminal.connectionAnchor(toward: from)
-            drawConnection(from: from, to: to)
-        }
-        for connection in canvas.noteConnections {
-            guard let note = connection.note, let terminal = connection.terminal,
-                  note.superview === canvas, terminal.superview === canvas else { continue }
-            let terminalCenter = NSPoint(x: terminal.frame.midX, y: terminal.frame.midY)
-            let from = note.connectionAnchor(toward: terminalCenter)
-            let to = terminal.connectionAnchor(toward: from)
-            drawConnection(from: from, to: to)
-        }
-        // Terminal-to-terminal links draw dashed to tell them apart.
-        for link in canvas.terminalConnections {
-            guard let first = link.first, let second = link.second,
-                  first.superview === canvas, second.superview === canvas else { continue }
-            let secondCenter = NSPoint(x: second.frame.midX, y: second.frame.midY)
-            let from = first.connectionAnchor(toward: secondCenter)
-            let to = second.connectionAnchor(toward: from)
-            drawConnection(from: from, to: to, dashed: true)
+        let selected = canvas.selectedConnector
+        // Terminal-to-terminal links draw dashed to tell them apart; the
+        // selected connector overrides everything with a dotted highlight.
+        for segment in canvas.connectorSegments() {
+            let style: ConnectionStyle = segment.id == selected
+                ? .selected
+                : (segment.dashed ? .dashed : .solid)
+            drawConnection(from: segment.from, to: segment.to, style: style)
         }
         if let pendingLine = canvas.pendingLine {
             var to = pendingLine.to
-            // Snap the loose end onto the hovered terminal's nearest port.
+            // Snap the loose end onto the hovered target's nearest port: any
+            // terminal, or a Log when dragging out from a terminal.
             if let terminal = canvas.terminalTile(at: to) {
                 to = terminal.connectionAnchor(toward: to)
+            } else if pendingLine.source is TerminalTileView,
+                      let note = canvas.noteTile(at: to) {
+                to = note.connectionAnchor(toward: to)
             }
             drawConnection(from: pendingLine.from, to: to)
         }
     }
 
-    private func drawConnection(from: NSPoint, to: NSPoint, dashed: Bool = false) {
+    private enum ConnectionStyle { case solid, dashed, selected }
+
+    private func drawConnection(from: NSPoint, to: NSPoint, style: ConnectionStyle = .solid) {
+        let selected = style == .selected
         let color = Theme.green
-        color.withAlphaComponent(0.85).setStroke()
+        color.withAlphaComponent(selected ? 1 : 0.85).setStroke()
         let path = NSBezierPath()
         path.move(to: from)
         path.line(to: to)
         path.lineWidth = 2.5
-        if dashed {
+        switch style {
+        case .solid:
+            break
+        case .dashed:
             path.setLineDash([6, 4], count: 2, phase: 0)
+        case .selected:
+            // Round caps turn a tight dash into a clear row of dots.
+            path.lineCapStyle = .round
+            path.setLineDash([0.5, 5], count: 2, phase: 0)
         }
         path.stroke()
         color.setFill()

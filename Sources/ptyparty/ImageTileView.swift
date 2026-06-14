@@ -202,18 +202,20 @@ final class ConnectHandleView: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
-        guard let canvas, let anchorPoint else { return }
+        guard let tile, let canvas, let anchorPoint else { return }
         canvas.pendingLine = (
             from: anchorPoint,
-            to: canvas.convert(event.locationInWindow, from: nil)
+            to: canvas.convert(event.locationInWindow, from: nil),
+            source: tile
         )
     }
 
     override func mouseDragged(with event: NSEvent) {
-        guard let canvas, let anchorPoint else { return }
+        guard let tile, let canvas, let anchorPoint else { return }
         canvas.pendingLine = (
             from: anchorPoint,
-            to: canvas.convert(event.locationInWindow, from: nil)
+            to: canvas.convert(event.locationInWindow, from: nil),
+            source: tile
         )
     }
 
@@ -221,13 +223,23 @@ final class ConnectHandleView: NSView {
         guard let tile, let canvas else { return }
         canvas.pendingLine = nil
         let point = canvas.convert(event.locationInWindow, from: nil)
-        guard let terminal = canvas.terminalTile(at: point) else { return }
         if let image = tile as? ImageTileView {
-            canvas.toggleConnection(from: image, to: terminal)
+            if let terminal = canvas.terminalTile(at: point) {
+                canvas.toggleConnection(from: image, to: terminal)
+            }
         } else if let note = tile as? NoteTileView {
-            canvas.toggleNoteConnection(from: note, to: terminal)
-        } else if let source = tile as? TerminalTileView, source !== terminal {
-            canvas.toggleTerminalConnection(source, terminal)
+            if let terminal = canvas.terminalTile(at: point) {
+                canvas.toggleNoteConnection(from: note, to: terminal)
+            }
+        } else if let source = tile as? TerminalTileView {
+            // A terminal's port lands on another terminal (terminal↔terminal)
+            // or on a Log, which is just the note→terminal link drawn the
+            // other way round.
+            if let terminal = canvas.terminalTile(at: point), terminal !== source {
+                canvas.toggleTerminalConnection(source, terminal)
+            } else if let note = canvas.noteTile(at: point) {
+                canvas.toggleNoteConnection(from: note, to: source)
+            }
         }
     }
 }

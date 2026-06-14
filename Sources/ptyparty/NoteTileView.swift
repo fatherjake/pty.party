@@ -20,13 +20,17 @@ final class NoteTileView: CanvasTileView {
 
     var isSelected = false {
         didSet {
-            for port in ports { port.isHidden = !isSelected }
+            updatePortVisibility()
             layer?.borderWidth = isSelected ? 2 : 1
             layer?.borderColor = (isSelected
                 ? Theme.green
                 : Self.cardBorder).cgColor
         }
     }
+
+    /// True while a terminal's connection line is being dragged, so the Log
+    /// reveals its ports as drop targets even when it isn't selected.
+    private var dragTargetsVisible = false
 
     private let closeButton = NSButton(frame: .zero)
     private let resizeGrip = ResizeGripView(frame: .zero)
@@ -474,6 +478,40 @@ final class NoteTileView: CanvasTileView {
 
     override func mouseEntered(with event: NSEvent) { closeButton.isHidden = false }
     override func mouseExited(with event: NSEvent) { closeButton.isHidden = true }
+
+    /// Ports show while the Log is selected (drag sources) or while a terminal's
+    /// connection line is being dragged (drop targets).
+    private func updatePortVisibility() {
+        let visible = isSelected || dragTargetsVisible
+        for port in ports {
+            port.isHidden = !visible
+            if !visible { port.isHighlighted = false }
+        }
+    }
+
+    /// Shows or hides the edge ports while a connection is dragged, letting the
+    /// Log act as a drop target for a terminal's port.
+    func setConnectionTargets(visible: Bool) {
+        dragTargetsVisible = visible
+        updatePortVisibility()
+    }
+
+    /// Highlights the port nearest the drag point (canvas coordinates), or
+    /// clears all highlights when passed nil.
+    func highlightConnectionTarget(near canvasPoint: NSPoint?) {
+        guard let canvasPoint, let canvas = superview else {
+            ports.forEach { $0.isHighlighted = false }
+            return
+        }
+        let local = convert(canvasPoint, from: canvas)
+        let nearest = ports.min {
+            hypot($0.frame.midX - local.x, $0.frame.midY - local.y) <
+            hypot($1.frame.midX - local.x, $1.frame.midY - local.y)
+        }
+        for port in ports {
+            port.isHighlighted = port === nearest
+        }
+    }
 
     override func mouseDown(with event: NSEvent) {
         guard let canvas = superview else { return }

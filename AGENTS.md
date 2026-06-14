@@ -1,4 +1,9 @@
+First, read PARTY.md before doing anything in this project.
+
 # Working Agreement
+
+> The canonical, installable copy of this agreement is [PARTY.md](PARTY.md) —
+> the Welcome card installs it into other projects. Keep the two in sync.
 
 ## Running activity log — on a connected Log card
 

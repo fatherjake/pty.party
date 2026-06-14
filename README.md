@@ -40,6 +40,26 @@ launch.
 
 ---
 
+## Prerequisites
+
+Before you build or run pty.party, make sure you have:
+
+| Requirement | Why | Notes |
+| --- | --- | --- |
+| **macOS 13 (Ventura) or later** | Platform target of the app. | Hard requirement. |
+| **Swift toolchain / SwiftPM** | Builds the app (`swift build`, `install.sh`). | Ships with Xcode or the Swift command-line tools. |
+| **Node.js + npm** | Runs the MCP server that lets agents read the canvas. | Only needed if you want the MCP integration (recommended). |
+| **`claude` CLI** | Powers **Claude** tiles. | Optional — install if you use Claude tiles. |
+| **`codex` CLI** | Powers **Codex** tiles. | Optional — install if you use Codex tiles. |
+
+The agent CLIs are looked up on your `PATH` and in the usual install locations
+(`~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin`) — install whichever
+agents you plan to use. Plain **Terminal** and **Command Runner** tiles just use
+your login shell, so they need none of the above. The **SwiftTerm** dependency
+is fetched automatically by SwiftPM during the build; no manual install needed.
+
+---
+
 ## Install
 
 ### 1. Build and install the app
@@ -95,6 +115,15 @@ The server discovers which terminal it's running in via the
 `PTYPARTY_TERMINAL_ID` environment variable that pty.party injects into every
 terminal it spawns, so connection-aware tools "just work" inside the app.
 
+### 3. Set up a project (Welcome card)
+
+On first launch a **Welcome card** appears on the canvas listing these
+requirements with a **Set up this project…** button. Clicking it installs the
+`ptyparty` skill into your project's `skills` folder (it'll ask where if there
+isn't one), drops a [`PARTY.md`](PARTY.md) working agreement at the project
+root, and prepends a line to your `AGENTS.md`/`CLAUDE.md` pointing agents at it.
+You can reopen the card any time from **File → Set Up Project…**.
+
 ---
 
 ## MCP tools
@@ -148,7 +177,7 @@ A Log card is a shared, live checklist. Create one (⇧⌘L or right-click → *
 Log**) and drag a connection from it to a terminal; the agent in that terminal
 can then push tasks with `add_to_checklist` and tick them off with
 `check_off_item` as it works — so you can watch progress on the canvas in real
-time. Several terminals can share one Log. See [`prompt.md`](prompt.md) for the
+time. Several terminals can share one Log. See [`AGENTS.md`](AGENTS.md) for the
 working agreement that drives this loop.
 
 ---
@@ -160,7 +189,8 @@ Sources/ptyparty/     The macOS app (Swift / AppKit / SwiftTerm)
 mcp-server/           The MCP server exposing the canvas to agents (Node.js)
 icon/                 App icon assets
 install.sh            Build + install as a .app bundle
-prompt.md             The connected-Log working agreement for agents
+AGENTS.md             The connected-Log working agreement for agents
+CLAUDE.md             Points Claude Code at AGENTS.md
 Package.swift         SwiftPM manifest
 ```
 
