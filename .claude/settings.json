@@ -1,0 +1,75 @@
+{
+  "hooks" : {
+    "Notification" : [
+      {
+        "hooks" : [
+          {
+            "command" : "[ -n \"$PTYPARTY_TERMINAL_ID\" ] && { d=\"$HOME/Library/Application Support/ptyparty/activity\"; mkdir -p \"$d\"; printf %s asking > \"$d/.$PTYPARTY_TERMINAL_ID\" && mv \"$d/.$PTYPARTY_TERMINAL_ID\" \"$d/$PTYPARTY_TERMINAL_ID\"; }",
+            "type" : "command"
+          }
+        ],
+        "matcher" : "permission_prompt"
+      },
+      {
+        "hooks" : [
+          {
+            "command" : "[ -n \"$PTYPARTY_TERMINAL_ID\" ] && { d=\"$HOME/Library/Application Support/ptyparty/activity\"; mkdir -p \"$d\"; printf %s asking > \"$d/.$PTYPARTY_TERMINAL_ID\" && mv \"$d/.$PTYPARTY_TERMINAL_ID\" \"$d/$PTYPARTY_TERMINAL_ID\"; }",
+            "type" : "command"
+          }
+        ],
+        "matcher" : "idle_prompt"
+      },
+      {
+        "hooks" : [
+          {
+            "command" : "[ -n \"$PTYPARTY_TERMINAL_ID\" ] && { d=\"$HOME/Library/Application Support/ptyparty/activity\"; mkdir -p \"$d\"; printf %s asking > \"$d/.$PTYPARTY_TERMINAL_ID\" && mv \"$d/.$PTYPARTY_TERMINAL_ID\" \"$d/$PTYPARTY_TERMINAL_ID\"; }",
+            "type" : "command"
+          }
+        ],
+        "matcher" : "elicitation_dialog"
+      }
+    ],
+    "PostToolUse" : [
+      {
+        "hooks" : [
+          {
+            "command" : "[ -n \"$PTYPARTY_TERMINAL_ID\" ] && { d=\"$HOME/Library/Application Support/ptyparty/activity\"; mkdir -p \"$d\"; printf %s working > \"$d/.$PTYPARTY_TERMINAL_ID\" && mv \"$d/.$PTYPARTY_TERMINAL_ID\" \"$d/$PTYPARTY_TERMINAL_ID\"; }",
+            "type" : "command"
+          }
+        ],
+        "matcher" : "*"
+      }
+    ],
+    "PreToolUse" : [
+      {
+        "hooks" : [
+          {
+            "command" : "[ -n \"$PTYPARTY_TERMINAL_ID\" ] && { d=\"$HOME/Library/Application Support/ptyparty/activity\"; mkdir -p \"$d\"; printf %s working > \"$d/.$PTYPARTY_TERMINAL_ID\" && mv \"$d/.$PTYPARTY_TERMINAL_ID\" \"$d/$PTYPARTY_TERMINAL_ID\"; }",
+            "type" : "command"
+          }
+        ],
+        "matcher" : "*"
+      }
+    ],
+    "Stop" : [
+      {
+        "hooks" : [
+          {
+            "command" : "[ -n \"$PTYPARTY_TERMINAL_ID\" ] && { d=\"$HOME/Library/Application Support/ptyparty/activity\"; mkdir -p \"$d\"; printf %s idle > \"$d/.$PTYPARTY_TERMINAL_ID\" && mv \"$d/.$PTYPARTY_TERMINAL_ID\" \"$d/$PTYPARTY_TERMINAL_ID\"; }",
+            "type" : "command"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit" : [
+      {
+        "hooks" : [
+          {
+            "command" : "[ -n \"$PTYPARTY_TERMINAL_ID\" ] && { d=\"$HOME/Library/Application Support/ptyparty/activity\"; mkdir -p \"$d\"; printf %s working > \"$d/.$PTYPARTY_TERMINAL_ID\" && mv \"$d/.$PTYPARTY_TERMINAL_ID\" \"$d/$PTYPARTY_TERMINAL_ID\"; }",
+            "type" : "command"
+          }
+        ]
+      }
+    ]
+  }
+}

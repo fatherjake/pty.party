@@ -87,7 +87,7 @@ final class WelcomeTileView: CanvasTileView {
         }
 
         stack.addArrangedSubview(label(
-            "Set up the current project so agents read PARTY.md and the ptyparty skill:",
+            "Set up the current project so agents read PARTY.md and the ptyparty skill, and so live tile status works via Claude Code hooks (Claude will ask once to trust them):",
             font: Theme.mono(12, .regular), color: Theme.textDim, wraps: true
         ))
 

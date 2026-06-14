@@ -13,6 +13,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var responderObservation: NSKeyValueObservation?
     private var inbox: CanvasInbox?
     private var broker: RequestBroker?
+    private var activityWatcher: ActivityWatcher?
     private var folderButton: NSButton!
     private var sessionSaveTimer: Timer?
 
@@ -161,6 +162,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.handleBrokerRequest(request) ?? [:]
         }
         broker?.start()
+
+        // Drive each tile's activity from Claude Code hooks (see
+        // ActivityWatcher). Clear stale state from a previous run first; the
+        // scraping heuristic remains the fallback for tiles without hooks.
+        clearActivityDirectory()
+        activityWatcher = ActivityWatcher { [weak self] terminalID, state in
+            guard let self,
+                  let activity = TerminalTileView.Activity(hookState: state),
+                  let tile = self.terminalTile(withID: terminalID) else { return }
+            tile.setHookActivity(activity)
+        }
+        activityWatcher?.start()
 
         if !restoreSession() {
             addClaudeTerminal(at: visibleCenter())
@@ -534,12 +547,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func installTerminalTile(_ tile: TerminalTileView) {
+        let terminalID = tile.terminalID
         tile.onClosed = { [weak self] in
+            self?.removeActivityFile(for: terminalID)
             DispatchQueue.main.async { self?.publishConnections() }
             self?.scheduleSessionSave()
         }
         canvas.addSubview(tile)
         scheduleSessionSave()
+    }
+
+    /// Wipes the hook-activity directory so a previous run's last states don't
+    /// briefly color tiles before fresh hook events arrive.
+    private func clearActivityDirectory() {
+        let dir = ActivityWatcher.directoryURL
+        let files = (try? FileManager.default.contentsOfDirectory(
+            at: dir, includingPropertiesForKeys: nil
+        )) ?? []
+        for url in files { try? FileManager.default.removeItem(at: url) }
+    }
+
+    private func removeActivityFile(for terminalID: String) {
+        try? FileManager.default.removeItem(
+            at: ActivityWatcher.directoryURL.appendingPathComponent(terminalID)
+        )
     }
 
     // MARK: - Welcome & project setup
@@ -613,8 +644,86 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 3. Point AGENTS.md (preferred) or CLAUDE.md at PARTY.md.
         summary.append("• \(addPointerLine(in: target))")
 
+        // 4. Claude Code hooks that report live activity to pty.party.
+        summary.append("• \(installActivityHooks(in: target))")
+
         // Show the result inline on the card rather than a separate dialog.
         card?.showComplete(summary)
+    }
+
+    /// The one-liner a hook runs: atomically write `state` to this terminal's
+    /// activity file, but only when running inside pty.party (guarded by the
+    /// injected env var, so it's a no-op anywhere else).
+    private static func activityHookCommand(_ state: String) -> String {
+        "[ -n \"$PTYPARTY_TERMINAL_ID\" ] && { d=\"$HOME/Library/Application Support/ptyparty/activity\"; mkdir -p \"$d\"; printf %s \(state) > \"$d/.$PTYPARTY_TERMINAL_ID\" && mv \"$d/.$PTYPARTY_TERMINAL_ID\" \"$d/$PTYPARTY_TERMINAL_ID\"; }"
+    }
+
+    /// Substring present in every pty.party hook command, used to find and
+    /// replace our own entries so re-running setup stays idempotent.
+    private static let activityHookMarker = "ptyparty/activity"
+
+    /// Merges the pty.party activity hooks into <project>/.claude/settings.json
+    /// without disturbing the user's other settings or hooks. Idempotent.
+    private func installActivityHooks(in target: String) -> String {
+        let fileManager = FileManager.default
+        let claudeDir = URL(fileURLWithPath: target).appendingPathComponent(".claude", isDirectory: true)
+        let settingsURL = claudeDir.appendingPathComponent("settings.json")
+
+        var root: [String: Any] = [:]
+        if let data = try? Data(contentsOf: settingsURL),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            root = obj
+        }
+        var hooks = (root["hooks"] as? [String: Any]) ?? [:]
+
+        func group(matcher: String?, state: String) -> [String: Any] {
+            var g: [String: Any] = [
+                "hooks": [["type": "command", "command": Self.activityHookCommand(state)]],
+            ]
+            if let matcher { g["matcher"] = matcher }
+            return g
+        }
+        let ours: [String: [[String: Any]]] = [
+            "UserPromptSubmit": [group(matcher: nil, state: "working")],
+            "PreToolUse": [group(matcher: "*", state: "working")],
+            "PostToolUse": [group(matcher: "*", state: "working")],
+            "Stop": [group(matcher: nil, state: "idle")],
+            "Notification": [
+                group(matcher: "permission_prompt", state: "asking"),
+                group(matcher: "idle_prompt", state: "asking"),
+                group(matcher: "elicitation_dialog", state: "asking"),
+            ],
+        ]
+        for (event, groups) in ours {
+            var existing = (hooks[event] as? [[String: Any]]) ?? []
+            // Drop any prior pty.party groups so re-running doesn't duplicate.
+            existing.removeAll { g in
+                guard let hs = g["hooks"] as? [[String: Any]] else { return false }
+                return hs.contains { ($0["command"] as? String)?.contains(Self.activityHookMarker) == true }
+            }
+            existing.append(contentsOf: groups)
+            hooks[event] = existing
+        }
+        root["hooks"] = hooks
+
+        do {
+            try fileManager.createDirectory(at: claudeDir, withIntermediateDirectories: true)
+            let data = try JSONSerialization.data(
+                withJSONObject: root, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+            )
+            try data.write(to: settingsURL)
+            return "Hooks → \(displayPath(settingsURL))"
+        } catch {
+            return "Hooks failed: \(error.localizedDescription)"
+        }
+    }
+
+    /// Whether the project's .claude/settings.json already carries our hooks.
+    private func activityHooksInstalled(in target: String) -> Bool {
+        let settingsURL = URL(fileURLWithPath: target)
+            .appendingPathComponent(".claude/settings.json")
+        guard let text = try? String(contentsOf: settingsURL, encoding: .utf8) else { return false }
+        return text.contains(Self.activityHookMarker)
     }
 
     /// Whether the project at `target` already has PARTY.md, a pointer line, and
@@ -641,7 +750,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         lines.append(skillURL.map { "• Skill → \(displayPath($0))" }
             ?? "• ptyparty skill not installed")
 
-        return (partyExists && pointerHost != nil && skillURL != nil, lines)
+        let hooksInstalled = activityHooksInstalled(in: target)
+        lines.append(hooksInstalled ? "• Activity hooks installed" : "• Activity hooks not installed")
+
+        return (partyExists && pointerHost != nil && skillURL != nil && hooksInstalled, lines)
     }
 
     /// The installed `ptyparty/SKILL.md`, if a `skills` folder in the project

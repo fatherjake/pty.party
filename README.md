@@ -137,8 +137,16 @@ On first launch a **Welcome card** appears on the canvas listing these
 requirements with a **Set up this project…** button. Clicking it installs the
 `ptyparty` skill into your project's `skills` folder (it'll ask where if there
 isn't one), drops a [`PARTY.md`](PARTY.md) working agreement at the project
-root, and prepends a line to your `AGENTS.md`/`CLAUDE.md` pointing agents at it.
-You can reopen the card any time from **File → Set Up Project…**.
+root, prepends a line to your `AGENTS.md`/`CLAUDE.md` pointing agents at it, and
+adds **Claude Code hooks** to `.claude/settings.json` so each tile shows live
+status — blue while working, amber when it needs you, idle when done. Claude
+Code will ask once to trust the new hooks. You can reopen the card any time from
+**File → Set Up Project…**.
+
+> The hooks report state by writing `PTYPARTY_TERMINAL_ID`-keyed files under
+> `~/Library/Application Support/ptyparty/activity/`, which the app watches.
+> They're guarded so they no-op outside pty.party. Terminals without them (Codex,
+> plain shells, un-set-up projects) fall back to inferring status from output.
 
 ---
 

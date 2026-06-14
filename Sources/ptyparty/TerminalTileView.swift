@@ -29,7 +29,20 @@ final class TerminalTileView: CanvasTileView {
 
     /// What the program in this terminal appears to be doing, inferred from its
     /// output, and shown as the tile's border color.
-    enum Activity { case working, asking, idle }
+    enum Activity {
+        case working, asking, idle
+
+        /// Maps a hook-written state word to an activity, ignoring anything we
+        /// don't recognize.
+        init?(hookState: String) {
+            switch hookState {
+            case "working": self = .working
+            case "asking": self = .asking
+            case "idle": self = .idle
+            default: return nil
+            }
+        }
+    }
 
     /// True while this tile's terminal has keyboard focus.
     var isFocused = false {
@@ -42,6 +55,12 @@ final class TerminalTileView: CanvasTileView {
     private var activity: Activity = .idle {
         didSet { if activity != oldValue { updateBorder() } }
     }
+
+    /// True once Claude Code hooks have reported this terminal's state. From
+    /// then on the hook events are authoritative and the screen-scraping
+    /// heuristic stands down (it remains the fallback for Codex tiles, plain
+    /// shells, and Claude sessions without the hooks installed/trusted).
+    private var usesHookActivity = false
 
     // Output-activity tracking, used to tell "working" from a settled prompt.
     private var lastOutputTime: TimeInterval = 0
@@ -203,7 +222,16 @@ final class TerminalTileView: CanvasTileView {
     /// Re-derives the activity state. Output seen very recently means working;
     /// once output settles, the visible buffer is scanned once to tell a
     /// pending question from a finished, idle prompt.
+    /// Authoritative state from a Claude Code hook (see ActivityWatcher). Takes
+    /// over from the heuristic the first time it's called.
+    func setHookActivity(_ activity: Activity) {
+        usesHookActivity = true
+        self.activity = activity
+    }
+
     private func evaluateActivity() {
+        // Hooks win once they've spoken; don't let the heuristic fight them.
+        guard !usesHookActivity else { return }
         let idleFor = ProcessInfo.processInfo.systemUptime - lastOutputTime
         if idleFor < 0.7 {
             activity = .working

@@ -95,6 +95,10 @@ The app and the `ptyparty` MCP server communicate over a small file RPC under
 - `connections/<terminalId>/` — images (and `notes/`) wired to each terminal.
 - `inbox/` — drop an image or note here and the app places it on the canvas.
 - `requests/` + `responses/` — the live-query RPC described above.
+- `activity/<terminalId>` — the tile's live status (`working`/`asking`/`idle`),
+  written by Claude Code hooks so the canvas shows whether a session is
+  working, needs you, or done.
 
 pty.party injects `PTYPARTY_TERMINAL_ID` into every terminal it spawns, so
-the connection-aware MCP tools know which terminal they're running in.
+the connection-aware MCP tools (and the activity hooks) know which terminal
+they're running in.
