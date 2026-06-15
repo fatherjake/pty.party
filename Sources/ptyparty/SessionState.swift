@@ -31,6 +31,9 @@ struct SessionState: Codable {
 
     var name: String?                 // display name shown in the session picker
     var workingDirectory: String?     // folder new terminals open in
+    var sessionHost: String?          // SSH target (user@host or ssh config alias); nil = local
+    var remoteDirectory: String?      // working dir on the remote host; nil = remote login default
+    var sshKeyPath: String?           // identity file passed to ssh -i; nil = ssh defaults/agent
     var magnification: CGFloat
     var scrollX: CGFloat
     var scrollY: CGFloat

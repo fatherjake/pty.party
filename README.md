@@ -200,6 +200,47 @@ Common shortcuts:
 | ⇧⌘O | Open session |
 | ⌘+ / ⌘− / ⌘0 | Zoom in / out / actual size |
 
+### Remote hosts (SSH)
+
+A session can run its tiles on a remote machine instead of locally. Choose
+**File → Set Session Host…** and enter an SSH target (`user@host` or an
+`~/.ssh/config` alias), an optional **SSH key file** (e.g. `~/.ssh/id_ed25519`),
+and an optional remote folder. New Claude / Codex / Terminal tiles then launch
+over SSH on that host; leave the host blank to go back to running everything
+locally. The settings are remembered per session. In the title bar, the badge
+shows `pty.party / <session> · <host>`: click the **session name** for the
+session menu, and click the **host** (`Local` / the SSH target) for a menu to
+switch to Local, set the host, or set the remote folder. The folder button on
+the right shows where new tiles open.
+
+If SSH prompts for a password even though you have a key, set the **SSH key
+file**: a GUI-launched app may not see your `ssh-agent`, and a key with a
+non-default filename isn't tried automatically. The path is passed to `ssh -i`
+(with `IdentitiesOnly`, so only that key is offered). A key with a passphrase
+will prompt for the passphrase inside the tile on first connect.
+
+It uses your existing SSH setup — keys, agent, `~/.ssh/config`, `known_hosts` —
+so anything you can `ssh` into already works. On the host:
+
+- **`dtach`** (recommended) makes tiles durable: a dropped connection or app
+  relaunch reattaches the live session, and because `dtach` does no screen
+  emulation, scrollback stays native. If `dtach` isn't installed, tiles fall
+  back to a plain SSH session (no reattach).
+- **`zsh`** is used as the remote login shell, and `claude` / `codex` must be on
+  the remote `PATH`.
+
+Remote Claude tiles can drive a connected **Log** too, with one extra step.
+The canvas RPC is reverse-forwarded over the SSH connection, but the host needs
+a small MCP bridge to call it. From the **host** menu in the title bar (click
+the host segment of the badge) choose **Set Up Remote Log…**: pty.party pushes a
+dependency-free bridge (`~/.ptyparty/ptyparty-bridge.mjs`, needs only `node` on
+the host) and registers it with the remote `claude`. Then restart your remote
+claude tiles so they pick it up, and connect a Log card to the tile —
+`add_to_checklist` / `check_off_item` now reach the canvas just like a local
+tile. (The image-inbox and connected-notes tools remain local-only for now, and
+the file-RPC fallback in [`PARTY.md`](PARTY.md) is local-only — remote tiles use
+this bridge.)
+
 ### The Log workflow
 
 A Log card is a shared, live checklist. Create one (⇧⌘L or right-click → **New

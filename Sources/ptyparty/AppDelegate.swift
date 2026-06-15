@@ -28,6 +28,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// to the home directory.
     private var sessionWorkingDirectory: String?
 
+    /// SSH target for this session (`user@host` or an `~/.ssh/config` alias).
+    /// When set, new terminals/claude/codex tiles run on the remote host over
+    /// SSH instead of locally. nil = everything runs locally (default).
+    private var sessionHost: String?
+
+    /// Working directory on the remote host. nil falls back to the remote
+    /// login shell's default directory.
+    private var remoteDirectory: String?
+
+    /// Identity file passed to `ssh -i` for remote tiles. nil lets ssh use its
+    /// own defaults (agent / ~/.ssh/config / default key names).
+    private var sshKeyPath: String?
+
     /// The folder new terminals open in. Belongs to the loaded session and is
     /// persisted in its session.json.
     private var workingDirectory: String {
@@ -123,7 +136,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ) { [weak self] _ in self?.edgeGlow.refresh() }
 
         sessionBadge = SessionBadgeView()
-        sessionBadge.onClick = { [weak self] badge in self?.showSessionMenu(from: badge) }
+        sessionBadge.onSelectSession = { [weak self] badge in self?.showSessionMenu(from: badge) }
+        sessionBadge.onSelectHost = { [weak self] badge in self?.showHostMenu(from: badge) }
         sessionBadge.autoresizingMask = [.maxXMargin, .minYMargin]  // pin top-left
         container.addSubview(sessionBadge)
         window.contentView = container
@@ -178,6 +192,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.handleBrokerRequest(request) ?? [:]
         }
         broker?.start()
+        // Also serve the same RPC over a socket reverse-forwarded into remote
+        // tiles, so a remote claude can drive the canvas Log.
+        broker?.startSocket(at: Self.rpcSocketURL)
 
         // Drive each tile's activity from Claude Code hooks (see
         // ActivityWatcher). Clear stale state from a previous run first; the
@@ -252,17 +269,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    // MARK: - Working folder selector
+    // MARK: - Working folder / host selector
 
-    /// A folder button in the title bar showing where new terminals open.
+    /// A `folder / host` breadcrumb in the title bar: the folder shows where new
+    /// terminals open, the host segment shows "local" or the SSH target. Each
+    /// segment is clickable to change it.
     private func addFolderSelector() {
-        folderButton = NSButton(
-            title: "",
-            target: self,
-            action: #selector(chooseWorkingDirectory(_:))
-        )
+        folderButton = NSButton(title: "", target: self, action: #selector(chooseWorkingDirectory(_:)))
         folderButton.bezelStyle = .texturedRounded
-        folderButton.image = NSImage(systemSymbolName: "folder", accessibilityDescription: "Working folder")
         folderButton.imagePosition = .imageLeading
         updateFolderButton()
 
@@ -274,12 +288,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateFolderButton() {
-        let path = workingDirectory
-        let display = path == NSHomeDirectory()
-            ? "~"
-            : URL(fileURLWithPath: path).lastPathComponent
-        folderButton.title = display
-        folderButton.toolTip = "New terminals open in \((path as NSString).abbreviatingWithTildeInPath)"
+        // The session badge owns the host indicator; keep it in sync here.
+        sessionBadge?.sessionHost = sessionHost
+        positionSessionBadge()
+        guard folderButton != nil else { return }
+        let remote = sessionHost.map { !$0.isEmpty } ?? false
+
+        // The folder button shows the local working folder, or the remote folder
+        // when the session runs on a host.
+        if remote {
+            folderButton.image = NSImage(systemSymbolName: "folder", accessibilityDescription: "Remote folder")
+            folderButton.title = remoteDirectory.flatMap { $0.isEmpty ? nil : $0 } ?? "~"
+            folderButton.toolTip = "New tiles open in this folder on \(sessionHost ?? "") — click to change"
+        } else {
+            let path = workingDirectory
+            folderButton.image = NSImage(systemSymbolName: "folder", accessibilityDescription: "Working folder")
+            folderButton.title = path == NSHomeDirectory()
+                ? "~" : URL(fileURLWithPath: path).lastPathComponent
+            folderButton.toolTip = "New terminals open in \((path as NSString).abbreviatingWithTildeInPath) — click to change"
+        }
+
         folderButton.sizeToFit()
         var size = folderButton.frame.size
         folderButton.frame.origin = .zero
@@ -288,6 +316,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func chooseWorkingDirectory(_ sender: Any?) {
+        // On a remote session the "folder" is a path on the host, which a local
+        // file panel can't browse — edit it in the host dialog instead.
+        if let host = sessionHost, !host.isEmpty {
+            promptRemoteDirectory(host: host)
+            return
+        }
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
@@ -299,6 +333,68 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if response == .OK, let url = panel.url {
                 self?.workingDirectory = url.path
             }
+        }
+    }
+
+    /// Edits just the remote working folder for the current host.
+    private func promptRemoteDirectory(host: String) {
+        let alert = NSAlert()
+        alert.messageText = "Remote Folder on \(host)"
+        alert.informativeText = "New tiles open in this folder on the host. "
+            + "Leave blank for the remote login default."
+        alert.addButton(withTitle: "Set")
+        alert.addButton(withTitle: "Cancel")
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        field.placeholderString = "~/projects/foo (optional)"
+        field.stringValue = remoteDirectory ?? ""
+        alert.accessoryView = field
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard let self, response == .alertFirstButtonReturn else { return }
+            let dir = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            self.remoteDirectory = dir.isEmpty ? nil : dir
+            self.updateFolderButton()
+            self.scheduleSessionSave()
+        }
+    }
+
+    /// Sets the SSH host (and optional remote folder) for this session. New
+    /// terminals/claude/codex tiles then run on that host; clearing the host
+    /// field returns the session to running everything locally.
+    @objc func chooseSessionHost(_ sender: Any?) {
+        let alert = NSAlert()
+        alert.messageText = "Session Host"
+        alert.informativeText = "Run new tiles on a remote host over SSH. "
+            + "Enter an SSH target (user@host or an ~/.ssh/config alias). "
+            + "Leave blank to run locally."
+        alert.addButton(withTitle: "Set")
+        alert.addButton(withTitle: "Cancel")
+
+        let hostField = NSTextField(frame: NSRect(x: 0, y: 60, width: 320, height: 24))
+        hostField.placeholderString = "user@host  (blank = local)"
+        hostField.stringValue = sessionHost ?? ""
+        let keyField = NSTextField(frame: NSRect(x: 0, y: 30, width: 320, height: 24))
+        keyField.placeholderString = "SSH key file, e.g. ~/.ssh/id_ed25519 (optional)"
+        keyField.stringValue = sshKeyPath ?? ""
+        let dirField = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        dirField.placeholderString = "remote folder (optional)"
+        dirField.stringValue = remoteDirectory ?? ""
+
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 84))
+        accessory.addSubview(hostField)
+        accessory.addSubview(keyField)
+        accessory.addSubview(dirField)
+        alert.accessoryView = accessory
+
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard let self, response == .alertFirstButtonReturn else { return }
+            let host = hostField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            let key = keyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            let dir = dirField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            self.sessionHost = host.isEmpty ? nil : host
+            self.sshKeyPath = key.isEmpty ? nil : key
+            self.remoteDirectory = dir.isEmpty ? nil : dir
+            self.updateFolderButton()
+            self.scheduleSessionSave()
         }
     }
 
@@ -500,6 +596,111 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         fallbacks: ["~/.local/bin/codex", "/opt/homebrew/bin/codex", "/usr/local/bin/codex"]
     )
 
+    // MARK: - Remote host (SSH)
+
+    /// Unix socket the app listens on for RPC from remote MCP servers. Each
+    /// remote tile reverse-forwards this into the host so a remote claude can
+    /// drive the canvas Log just like a local one.
+    static let rpcSocketURL: URL = {
+        FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("ptyparty/rpc.sock")
+    }()
+
+    /// POSIX single-quote escaping so a string survives a remote shell verbatim.
+    private func shellQuote(_ s: String) -> String {
+        "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    /// A `cd` into the remote working folder. A leading `~` must expand on the
+    /// host, so it can't be single-quoted; the rest is still quoted for spaces.
+    private func remoteCdSnippet(_ dir: String) -> String {
+        if dir == "~" {
+            return "cd \"$HOME\"; "
+        }
+        if dir.hasPrefix("~/") {
+            return "cd \"$HOME\"\(shellQuote(String(dir.dropFirst()))); "
+        }
+        return "cd \(shellQuote(dir)); "
+    }
+
+    /// The remote command for a claude tile: resume the pinned session if the
+    /// host already has its history, otherwise create it under that ID.
+    private func remoteClaudeCmd(_ uuid: String) -> String {
+        "sh -c 'if ls \"$HOME\"/.claude/projects/*/\(uuid).jsonl >/dev/null 2>&1; "
+            + "then exec claude --resume \(uuid); else exec claude --session-id \(uuid); fi'"
+    }
+
+    /// The remote command for a plain login shell tile.
+    private let remoteShellCmd = "\"${SHELL:-zsh}\" -i"
+
+    /// Builds the (executable, args) to run `remoteCmd` for tile `terminalID`
+    /// on `host` over SSH. Durability comes from `dtach` (no screen emulation,
+    /// so SwiftTerm keeps native scrollback); the tile's env and a reverse-
+    /// forwarded RPC socket are inlined so a remote claude can drive the Log.
+    private func remoteLaunch(terminalID: String, remoteCmd: String, host: String)
+        -> (executable: String, args: [String])
+    {
+        let dtachSock = "/tmp/ptyparty-\(terminalID).sock"
+        let rpcSock = "/tmp/ptyparty-rpc-\(terminalID).sock"
+
+        var inner = "export PTYPARTY_TERMINAL_ID=\(terminalID); "
+        inner += "export TERM=xterm-256color; export COLORTERM=truecolor; "
+        inner += "export PTYPARTY_RPC=unix:\(rpcSock); "
+        if let dir = remoteDirectory, !dir.isEmpty {
+            inner += remoteCdSnippet(dir)
+        }
+        inner += "exec \(remoteCmd)"
+        let innerQ = shellQuote(inner)
+
+        // Reattach via dtach when present (durable), else run directly. Use an
+        // interactive login shell (-lic, like the local CLI resolver) so PATH
+        // additions in ~/.zshrc — where claude/codex usually land — are loaded.
+        let remote =
+            "command -v dtach >/dev/null 2>&1 && "
+            + "exec dtach -A \(shellQuote(dtachSock)) -r winch zsh -lic \(innerQ) || "
+            + "exec zsh -lic \(innerQ)"
+
+        var args = [
+            "-tt",
+            // ControlMaster needs a ControlPath, or ssh errors out; %C keeps the
+            // socket name short and unique per connection.
+            "-o", "ControlMaster=auto",
+            "-o", "ControlPath=/tmp/ptyparty-ssh-%C",
+            "-o", "ControlPersist=300",
+            "-o", "StreamLocalBindUnlink=yes",
+            "-R", "\(rpcSock):\(Self.rpcSocketURL.path)",
+        ]
+        // Use the chosen identity file, and only that one, so a non-default key
+        // name is actually offered instead of falling through to a password.
+        if let key = sshKeyPath, !key.isEmpty {
+            args += ["-i", (key as NSString).expandingTildeInPath, "-o", "IdentitiesOnly=yes"]
+        }
+        args += [host, remote]
+        return ("/usr/bin/ssh", args)
+    }
+
+    /// Launches `tile` as a remote tile of the given logical `program`.
+    private func startRemoteTile(
+        _ tile: TerminalTileView, program: String?, remoteCmd: String, host: String
+    ) {
+        let (exe, args) = remoteLaunch(terminalID: tile.terminalID, remoteCmd: remoteCmd, host: host)
+        tile.startRemote(
+            executable: exe, args: args, program: program,
+            title: program ?? host, in: workingDirectory
+        )
+    }
+
+    /// Creates and installs a terminal tile (no process launched yet).
+    private func makeTerminalTile(at center: NSPoint) -> TerminalTileView {
+        let size = TerminalTileView.defaultSize
+        let origin = NSPoint(x: center.x - size.width / 2, y: center.y - size.height / 2)
+        let tile = TerminalTileView(frame: NSRect(origin: origin, size: size))
+        installTerminalTile(tile)
+        window.makeFirstResponder(tile.terminal)
+        return tile
+    }
+
     @objc func newClaudeTerminal(_ sender: Any?) {
         addClaudeTerminal(at: cascadedVisibleCenter())
     }
@@ -517,17 +718,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func addClaudeTerminal(at point: NSPoint) {
+        // Pin a session ID so a relaunch can resume this exact conversation.
+        let sessionID = UUID().uuidString.lowercased()
+        if let host = sessionHost, !host.isEmpty {
+            let tile = makeTerminalTile(at: point)
+            tile.claudeSessionID = sessionID
+            startRemoteTile(tile, program: "claude", remoteCmd: remoteClaudeCmd(sessionID), host: host)
+            return
+        }
         guard let claudePath else {
             presentCLIMissingAlert(name: "claude")
             return
         }
-        // Pin a session ID so a relaunch can resume this exact conversation.
-        let sessionID = UUID().uuidString.lowercased()
         let tile = addTerminal(at: point, program: claudePath, programArgs: ["--session-id", sessionID])
         tile.claudeSessionID = sessionID
     }
 
     private func addCodexTerminal(at point: NSPoint) {
+        if let host = sessionHost, !host.isEmpty {
+            let tile = makeTerminalTile(at: point)
+            startRemoteTile(tile, program: "codex", remoteCmd: "codex", host: host)
+            return
+        }
         guard let codexPath else {
             presentCLIMissingAlert(name: "codex")
             return
@@ -549,16 +761,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func addTerminal(
         at center: NSPoint, program: String? = nil, programArgs: [String] = []
     ) -> TerminalTileView {
-        let size = TerminalTileView.defaultSize
-        let origin = NSPoint(x: center.x - size.width / 2, y: center.y - size.height / 2)
-        let tile = TerminalTileView(frame: NSRect(origin: origin, size: size))
-        installTerminalTile(tile)
-        if let program {
+        let tile = makeTerminalTile(at: center)
+        // Claude/Codex remote tiles are launched by their own entry points; a
+        // bare addTerminal on a remote session means a plain remote shell.
+        if let host = sessionHost, !host.isEmpty, program == nil {
+            startRemoteTile(tile, program: nil, remoteCmd: remoteShellCmd, host: host)
+        } else if let program {
             tile.startProgram(program, args: programArgs, in: workingDirectory)
         } else {
             tile.startShell(in: workingDirectory)
         }
-        window.makeFirstResponder(tile.terminal)
         return tile
     }
 
@@ -1195,6 +1407,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func updateWindowTitle() {
         window.title = currentSession.map { "pty.party — \($0.name)" } ?? "pty.party"
         sessionBadge?.sessionName = currentSession?.name ?? ""
+        sessionBadge?.sessionHost = sessionHost
         positionSessionBadge()
     }
 
@@ -1235,8 +1448,132 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let deleteItem = NSMenuItem(title: "Delete Session…", action: #selector(deleteSession(_:)), keyEquivalent: "")
         deleteItem.target = self
         menu.addItem(deleteItem)
-        // Anchor just below the badge's bottom-left corner.
-        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: -4), in: badge)
+        // Anchor just below the session name.
+        menu.popUp(positioning: nil, at: NSPoint(x: badge.nameSegmentMinX, y: -4), in: badge)
+    }
+
+    /// Pops up the host menu under the badge's host segment: a quick "Local"
+    /// toggle plus the host / remote-folder editors.
+    private func showHostMenu(from badge: SessionBadgeView) {
+        let remote = sessionHost.map { !$0.isEmpty } ?? false
+        let menu = NSMenu()
+        menu.autoenablesItems = false  // honor folderItem.isEnabled below
+
+        let localItem = NSMenuItem(title: "Local", action: #selector(setLocalHost(_:)), keyEquivalent: "")
+        localItem.target = self
+        localItem.state = remote ? .off : .on
+        menu.addItem(localItem)
+        menu.addItem(.separator())
+
+        let hostItem = NSMenuItem(title: "Set Session Host…", action: #selector(chooseSessionHost(_:)), keyEquivalent: "")
+        hostItem.target = self
+        menu.addItem(hostItem)
+
+        let folderItem = NSMenuItem(title: "Set Remote Folder…", action: #selector(chooseWorkingDirectory(_:)), keyEquivalent: "")
+        folderItem.target = self
+        folderItem.isEnabled = remote
+        menu.addItem(folderItem)
+
+        menu.addItem(.separator())
+        let logItem = NSMenuItem(title: "Set Up Remote Log…", action: #selector(setUpRemoteLog(_:)), keyEquivalent: "")
+        logItem.target = self
+        logItem.isEnabled = remote
+        menu.addItem(logItem)
+
+        // Anchor just below the host segment.
+        menu.popUp(positioning: nil, at: NSPoint(x: badge.hostSegmentMinX, y: -4), in: badge)
+    }
+
+    /// Clears the session host, returning new tiles to running locally.
+    @objc func setLocalHost(_ sender: Any?) {
+        sessionHost = nil
+        remoteDirectory = nil
+        updateFolderButton()
+        updateWindowTitle()
+        scheduleSessionSave()
+    }
+
+    @objc func setUpRemoteLog(_ sender: Any?) {
+        guard let host = sessionHost, !host.isEmpty else { return }
+        installRemoteLogSupport(host: host)
+    }
+
+    /// Pushes the dependency-free MCP bridge to `host` and registers it with the
+    /// remote claude, so remote claude tiles can drive the canvas Log over the
+    /// reverse-forwarded RPC socket. Runs in the background and reports the result.
+    private func installRemoteLogSupport(host: String) {
+        // One ssh call: write the bridge from stdin, then register it with the
+        // remote claude (via an interactive login shell so claude is on PATH).
+        let remoteScript = """
+        mkdir -p "$HOME/.ptyparty" \
+        && cat > "$HOME/.ptyparty/ptyparty-bridge.mjs" \
+        && zsh -lic 'if command -v claude >/dev/null 2>&1; then \
+        claude mcp list 2>/dev/null | grep -q ptyparty \
+        || claude mcp add --scope user ptyparty -- node "$HOME/.ptyparty/ptyparty-bridge.mjs"; \
+        echo PTYPARTY_OK; else echo PTYPARTY_NO_CLAUDE; fi'
+        """
+
+        // Reuse the live ControlMaster connection a tile already opened, so this
+        // needs no extra auth.
+        var args = [
+            "-o", "ControlMaster=auto",
+            "-o", "ControlPath=/tmp/ptyparty-ssh-%C",
+            "-o", "ControlPersist=300",
+            "-o", "ConnectTimeout=10",
+        ]
+        if let key = sshKeyPath, !key.isEmpty {
+            args += ["-i", (key as NSString).expandingTildeInPath, "-o", "IdentitiesOnly=yes"]
+        }
+        args += [host, remoteScript]
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+        process.arguments = args
+        let stdin = Pipe(), output = Pipe()
+        process.standardInput = stdin
+        process.standardOutput = output
+        process.standardError = output
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            var text = ""
+            var status: Int32 = -1
+            do {
+                try process.run()
+                stdin.fileHandleForWriting.write(Data(RemoteBridge.source.utf8))
+                try? stdin.fileHandleForWriting.close()
+                let data = output.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                text = String(data: data, encoding: .utf8) ?? ""
+                status = process.terminationStatus
+            } catch {
+                text = error.localizedDescription
+            }
+            DispatchQueue.main.async {
+                self.presentRemoteLogResult(host: host, status: status, output: text)
+            }
+        }
+    }
+
+    private func presentRemoteLogResult(host: String, status: Int32, output: String) {
+        let alert = NSAlert()
+        if output.contains("PTYPARTY_OK") {
+            alert.messageText = "Remote Log ready on \(host)"
+            alert.informativeText = "The pty.party MCP bridge is installed and registered. "
+                + "Restart any remote claude tiles (close and reopen) so they pick it up, "
+                + "then connect a Log card to the tile."
+        } else if output.contains("PTYPARTY_NO_CLAUDE") {
+            alert.alertStyle = .warning
+            alert.messageText = "Bridge copied, but claude wasn't found on \(host)"
+            alert.informativeText = "The bridge file was written to ~/.ptyparty, but `claude` "
+                + "isn't on the host's login PATH, so it couldn't be registered. Install Claude "
+                + "Code on the host (or fix its PATH) and try again."
+        } else {
+            alert.alertStyle = .warning
+            alert.messageText = "Couldn't set up the remote Log on \(host)"
+            alert.informativeText = "ssh exited with status \(status).\n\n"
+                + (output.isEmpty ? "No output." : output)
+        }
+        alert.beginSheetModal(for: window)
     }
 
     @objc private func switchToSessionMenuItem(_ sender: NSMenuItem) {
@@ -1488,6 +1825,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let state = SessionState(
             name: currentSession.name,
             workingDirectory: sessionWorkingDirectory,
+            sessionHost: sessionHost,
+            remoteDirectory: remoteDirectory,
+            sshKeyPath: sshKeyPath,
             magnification: scrollView.magnification,
             scrollX: scrollView.contentView.bounds.origin.x,
             scrollY: scrollView.contentView.bounds.origin.y,
@@ -1533,13 +1873,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
               let state = try? JSONDecoder().decode(SessionState.self, from: data)
         else {
             sessionWorkingDirectory = nil
+            sessionHost = nil
+            remoteDirectory = nil
+            sshKeyPath = nil
             updateFolderButton()
             return false
         }
 
-        // The working folder belongs to the session, so adopt it even when the
-        // canvas itself is empty.
+        // The working folder and remote host belong to the session, so adopt
+        // them even when the canvas itself is empty.
         sessionWorkingDirectory = state.workingDirectory
+        sessionHost = state.sessionHost
+        remoteDirectory = state.remoteDirectory
+        sshKeyPath = state.sshKeyPath
         updateFolderButton()
 
         guard !state.tiles.isEmpty else { return false }
@@ -1550,6 +1896,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case .terminal:
                 let view = TerminalTileView(frame: frame, terminalID: tile.id)
                 installTerminalTile(view)
+                if let host = sessionHost, !host.isEmpty {
+                    // Remote tiles reattach their own dtach session (keyed by
+                    // tile id), resuming the live process where it left off.
+                    switch tile.program {
+                    case "codex"?:
+                        startRemoteTile(view, program: "codex", remoteCmd: "codex", host: host)
+                    case .some:
+                        let sessionID = tile.claudeSession ?? UUID().uuidString.lowercased()
+                        view.claudeSessionID = sessionID
+                        startRemoteTile(view, program: "claude",
+                                        remoteCmd: remoteClaudeCmd(sessionID), host: host)
+                    case .none:
+                        startRemoteTile(view, program: nil, remoteCmd: remoteShellCmd, host: host)
+                    }
+                    continue
+                }
                 let directory = tile.directory ?? workingDirectory
                 switch tile.program {
                 case "codex"?:
@@ -1744,6 +2106,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         fileMenu.addItem(logItem)
         fileMenu.addItem(.separator())
         fileMenu.addItem(withTitle: "Set Working Folder…", action: #selector(chooseWorkingDirectory(_:)), keyEquivalent: "o")
+        fileMenu.addItem(withTitle: "Set Session Host…", action: #selector(chooseSessionHost(_:)), keyEquivalent: "")
         fileMenu.addItem(withTitle: "Set Up Project…", action: #selector(showWelcome(_:)), keyEquivalent: "")
         fileMenu.addItem(.separator())
         fileMenu.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")

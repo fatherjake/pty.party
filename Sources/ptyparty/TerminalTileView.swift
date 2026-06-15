@@ -18,6 +18,11 @@ final class TerminalTileView: CanvasTileView {
     /// tile's own conversation rather than the directory's most recent one.
     var claudeSessionID: String?
 
+    /// When true (remote tiles), the tile stays on the canvas after its process
+    /// exits instead of removing itself, so an SSH error or a dropped
+    /// connection stays readable rather than vanishing instantly.
+    var keepOpenOnExit = false
+
     /// Name of the directly launched program ("claude"), nil for a shell.
     private(set) var launchedProgramName: String?
     /// Directory the process was started in.
@@ -453,6 +458,19 @@ final class TerminalTileView: CanvasTileView {
         start(executable: executable, args: args, execName: nil, in: directory)
     }
 
+    /// Launches a remote tile: the real process is `ssh`, but `program` records
+    /// the *logical* kind ("claude"/"codex"/nil = shell) so titles and session
+    /// restore behave exactly like a local tile of that kind.
+    func startRemote(
+        executable: String, args: [String], program: String?, title: String, in directory: String
+    ) {
+        setTitle(title)
+        launchedProgramName = program
+        startDirectory = directory
+        keepOpenOnExit = true
+        start(executable: executable, args: args, execName: nil, in: directory)
+    }
+
     private func start(executable: String, args: [String] = [], execName: String?, in directory: String) {
         var env = ProcessInfo.processInfo.environment
         env["TERM"] = "xterm-256color"
@@ -530,6 +548,13 @@ extension TerminalTileView: LocalProcessTerminalViewDelegate {
 
     func processTerminated(source: TerminalView, exitCode: Int32?) {
         activityTimer?.invalidate()
+        if keepOpenOnExit {
+            let code = exitCode.map { "exit \($0)" } ?? "disconnected"
+            terminal.getTerminal().feed(
+                text: "\r\n\u{1b}[2m[\(code)] — close this tile with its × button\u{1b}[0m\r\n"
+            )
+            return
+        }
         onClosed?()
         removeFromSuperview()
     }
