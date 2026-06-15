@@ -3,6 +3,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { mkdir, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 import { execFileSync } from "node:child_process";
+import { connect } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -31,7 +32,46 @@ const CONNECTIONS_DIR = join(
 const REQUESTS_DIR = join(homedir(), "Library/Application Support/ptyparty/requests");
 const RESPONSES_DIR = join(homedir(), "Library/Application Support/ptyparty/responses");
 
+// When pty.party runs this terminal on a remote host, it sets PTYPARTY_RPC to
+// a reverse-forwarded socket (unix:/path) so requests reach the Mac app over
+// SSH instead of the local Application Support directory, which isn't there.
+const RPC_TARGET = process.env.PTYPARTY_RPC;
+
+// One request per connection over the forwarded socket: send a newline-framed
+// JSON object, read one JSON line back. Mirrors the file-RPC's one-shot model.
+function socketRequest(socketPath, payload, timeoutMs) {
+  return new Promise((resolve) => {
+    const sock = connect(socketPath);
+    let buf = "";
+    let settled = false;
+    const done = (value) => {
+      if (settled) return;
+      settled = true;
+      sock.destroy();
+      resolve(value);
+    };
+    sock.setTimeout(timeoutMs, () => done(null));
+    sock.on("connect", () => sock.write(JSON.stringify(payload) + "\n"));
+    sock.on("data", (chunk) => {
+      buf += chunk;
+      const nl = buf.indexOf("\n");
+      if (nl >= 0) {
+        try {
+          done(JSON.parse(buf.slice(0, nl)));
+        } catch {
+          done(null);
+        }
+      }
+    });
+    sock.on("error", () => done(null));
+    sock.on("close", () => done(null));
+  });
+}
+
 async function ptypartyRequest(payload, timeoutMs = 3000) {
+  if (RPC_TARGET?.startsWith("unix:")) {
+    return socketRequest(RPC_TARGET.slice("unix:".length), payload, timeoutMs);
+  }
   await mkdir(REQUESTS_DIR, { recursive: true });
   const id = randomUUID();
   const staging = join(REQUESTS_DIR, `.staging-${id}`);

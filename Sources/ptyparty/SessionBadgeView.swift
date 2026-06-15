@@ -4,9 +4,21 @@ import AppKit
 /// app glyph, the "pty.party" wordmark, and the current session name with a
 /// dropdown chevron. Clicking anywhere on it opens the session switcher.
 final class SessionBadgeView: NSView {
-    /// Called when the badge is clicked, so the app can pop up a session menu
-    /// anchored to it.
-    var onClick: ((SessionBadgeView) -> Void)?
+    /// Called when the session name region is clicked, to pop up the session
+    /// menu anchored under it.
+    var onSelectSession: ((SessionBadgeView) -> Void)?
+
+    /// Called when the host region is clicked, to pop up the host menu anchored
+    /// under it. Use `hostSegmentMinX` to anchor it.
+    var onSelectHost: ((SessionBadgeView) -> Void)?
+
+    /// X (in this view's coords) where the host region begins — the boundary
+    /// used for hit-testing and for anchoring the host menu.
+    private(set) var hostSegmentMinX: CGFloat = 0
+
+    /// X (in this view's coords) where the session name begins — used to anchor
+    /// the session menu under the name rather than the badge's left edge.
+    private(set) var nameSegmentMinX: CGFloat = 0
 
     /// The session name shown after the "pty.party /" wordmark.
     var sessionName: String = "" {
@@ -16,6 +28,24 @@ final class SessionBadgeView: NSView {
             sizeToFit()
             needsDisplay = true
         }
+    }
+
+    /// The SSH target this session runs on (`user@host` or an `~/.ssh/config`
+    /// alias), or nil/empty for a local session. Shown as a trailing segment so
+    /// you can see at a glance where the session's tiles run.
+    var sessionHost: String? {
+        didSet {
+            guard sessionHost != oldValue else { return }
+            invalidateIntrinsicContentSize()
+            sizeToFit()
+            needsDisplay = true
+        }
+    }
+
+    /// The host label: the SSH target when remote, otherwise "Local".
+    private var hostText: String {
+        if let host = sessionHost, !host.isEmpty { return host }
+        return "Local"
     }
 
     override var isFlipped: Bool { false }
@@ -31,6 +61,7 @@ final class SessionBadgeView: NSView {
     private var wordFont: NSFont { Theme.mono(15, .bold) }
     private var slashFont: NSFont { Theme.mono(15, .medium) }
     private var nameFont: NSFont { Theme.mono(14, .medium) }
+    private var hostFont: NSFont { Theme.mono(12, .medium) }
     private var chevronFont: NSFont { Theme.mono(10, .semibold) }
 
     init() {
@@ -62,6 +93,8 @@ final class SessionBadgeView: NSView {
             + width("pty.party", wordFont) + Self.gap
             + width("/", slashFont) + Self.gap
             + width(name, nameFont) + Self.gap
+            + width("▾", chevronFont) + Self.gap   // session dropdown chevron
+            + width(hostText, hostFont) + Self.gap
             + width("▾", chevronFont) + Self.hPad
     }
 
@@ -104,8 +137,18 @@ final class SessionBadgeView: NSView {
         x += Self.gap
         drawString("/", slashFont, Theme.green, at: &x)
         x += Self.gap
+        nameSegmentMinX = x
         let name = sessionName.isEmpty ? "session" : sessionName
         drawString(name, nameFont, Theme.textDim, at: &x)
+        x += Self.gap
+        drawString("▾", chevronFont, Theme.textDim, at: &x)  // session dropdown
+        x += Self.gap
+
+        // Everything from here on is the host region (its own dropdown).
+        hostSegmentMinX = x
+        // Remote host stands out in green; a plain local session reads dim.
+        let isRemote = sessionHost.map { !$0.isEmpty } ?? false
+        drawString(hostText, hostFont, isRemote ? Theme.green : Theme.textDim, at: &x)
         x += Self.gap
         drawString("▾", chevronFont, Theme.textDim, at: &x)
     }
@@ -125,6 +168,11 @@ final class SessionBadgeView: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
-        onClick?(self)
+        let point = convert(event.locationInWindow, from: nil)
+        if hostSegmentMinX > 0, point.x >= hostSegmentMinX {
+            onSelectHost?(self)
+        } else {
+            onSelectSession?(self)
+        }
     }
 }

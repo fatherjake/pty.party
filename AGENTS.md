@@ -77,3 +77,9 @@ in `responses/` under the same name.
   ```
 
 Both still require a Log connected to this terminal, exactly like the MCP tools.
+
+**On a remote host this file fallback does not work** — that directory lives on
+the Mac running pty.party, not on the host. Remote tiles reach the canvas
+through the MCP bridge instead (set it up from the title bar's host menu →
+**Set Up Remote Log…**), so use the `add_to_checklist` / `check_off_item` MCP
+tools there.
