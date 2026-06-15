@@ -23,6 +23,16 @@ final class TerminalTileView: CanvasTileView {
     /// connection stays readable rather than vanishing instantly.
     var keepOpenOnExit = false
 
+    /// Set when a remote tile launches; the first bytes back (dtach attached)
+    /// trigger a one-shot redraw nudge so the reattached screen repaints.
+    private var pendingRemoteRedraw = false
+
+    /// SSH target this tile runs on when remote, so closing the tile can tear
+    /// down its remote dtach session instead of orphaning it. nil for local.
+    var remoteHost: String?
+    /// Identity file used for the remote host, if any (mirrors the session's).
+    var remoteKeyPath: String?
+
     /// Name of the directly launched program ("claude"), nil for a shell.
     private(set) var launchedProgramName: String?
     /// Directory the process was started in.
@@ -158,6 +168,15 @@ final class TerminalTileView: CanvasTileView {
             guard let self else { return }
             self.lastOutputTime = ProcessInfo.processInfo.systemUptime
             self.needsRescan = true
+            // First bytes from a remote tile mean its dtach session is attached.
+            // dtach keeps no screen buffer, so nothing has repainted yet — nudge
+            // the PTY size to force a redraw (see nudgeRemoteRedraw).
+            if self.pendingRemoteRedraw {
+                self.pendingRemoteRedraw = false
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                    self?.nudgeRemoteRedraw()
+                }
+            }
         }
         terminal.onBell = { [weak self] in self?.needsRescan = true }
 
@@ -468,7 +487,43 @@ final class TerminalTileView: CanvasTileView {
         launchedProgramName = program
         startDirectory = directory
         keepOpenOnExit = true
+        pendingRemoteRedraw = true
         start(executable: executable, args: args, execName: nil, in: directory)
+        // Fallback: a reattached program that emits nothing on attach never
+        // fires onData, so nudge anyway once the connection has had time to
+        // settle. Whichever path runs first clears pendingRemoteRedraw.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) { [weak self] in
+            guard let self, self.pendingRemoteRedraw else { return }
+            self.pendingRemoteRedraw = false
+            self.nudgeRemoteRedraw()
+        }
+    }
+
+    /// Forces the reattached remote program to repaint. dtach keeps no screen
+    /// buffer, so on reattach a SIGWINCH with an *unchanged* size often leaves
+    /// claude/zsh blank. Briefly shrinking the tile by one cell row and
+    /// restoring it sends a genuine size change, which triggers a full redraw.
+    ///
+    /// This nudges the *tile frame* (the same path as a user resize) rather than
+    /// SwiftTerm's logical size directly — poking the logical rows/cols while the
+    /// view frame disagrees leaves the terminal geometry out of sync and wedges
+    /// the canvas until the next layout.
+    private func nudgeRemoteRedraw() {
+        // Skip if the tile has been detached (e.g. a session switch tore it down
+        // before this fired) — resizing a stray view only causes trouble.
+        guard superview != nil else { return }
+        let term = terminal.getTerminal()
+        guard term.rows > 2 else { return }
+        let cellHeight = terminal.getOptimalFrameSize().height / CGFloat(term.rows)
+        guard cellHeight > 0 else { return }
+        let original = frame.size
+        setFrameSize(NSSize(width: original.width, height: original.height - cellHeight))
+        layoutSubtreeIfNeeded()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            guard let self, self.superview != nil else { return }
+            self.setFrameSize(original)
+            self.layoutSubtreeIfNeeded()
+        }
     }
 
     private func start(executable: String, args: [String] = [], execName: String?, in directory: String) {

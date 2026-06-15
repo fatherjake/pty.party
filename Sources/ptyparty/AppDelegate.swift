@@ -41,6 +41,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// own defaults (agent / ~/.ssh/config / default key names).
     private var sshKeyPath: String?
 
+    /// Remote hosts already probed for `dtach` this run, so the "won't survive
+    /// quitting" warning shows at most once per host (see verifyRemoteDurability).
+    private var durabilityCheckedHosts: Set<String> = []
+
     /// The folder new terminals open in. Belongs to the loaded session and is
     /// persisted in its session.json.
     private var workingDirectory: String {
@@ -684,11 +688,124 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func startRemoteTile(
         _ tile: TerminalTileView, program: String?, remoteCmd: String, host: String
     ) {
+        verifyRemoteDurability(host: host)
+        tile.remoteHost = host
+        tile.remoteKeyPath = sshKeyPath
         let (exe, args) = remoteLaunch(terminalID: tile.terminalID, remoteCmd: remoteCmd, host: host)
         tile.startRemote(
             executable: exe, args: args, program: program,
             title: program ?? host, in: workingDirectory
         )
+    }
+
+    /// Tears down the remote dtach session for a closed remote tile, so the
+    /// daemon (and its claude/shell) doesn't keep running orphaned on the host.
+    /// Only fired on an explicit tile close — a session switch terminates tiles
+    /// without this, deliberately leaving their durable sessions alive to resume.
+    private func killRemoteDtach(terminalID: String, host: String, key: String?) {
+        var args = [
+            "-o", "BatchMode=yes",
+            "-o", "ControlMaster=no",
+            "-o", "ControlPath=/tmp/ptyparty-ssh-%C",
+        ]
+        if let key, !key.isEmpty {
+            args += ["-i", (key as NSString).expandingTildeInPath, "-o", "IdentitiesOnly=yes"]
+        }
+        // Kill the dtach daemon (its child gets SIGHUP) and drop both sockets.
+        // The "[p]typarty" bracket keeps pkill from matching its own command.
+        let sock = "/tmp/ptyparty-\(terminalID).sock"
+        let rpcSock = "/tmp/ptyparty-rpc-\(terminalID).sock"
+        let remote = "pkill -f '[p]typarty-\(terminalID)'; rm -f \(sock) \(rpcSock)"
+        args += [host, remote]
+        DispatchQueue.global(qos: .utility).async {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+            process.arguments = args
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            guard (try? process.run()) != nil else { return }
+            process.waitUntilExit()
+        }
+    }
+
+    /// Probes `host` for `dtach` and, if it's missing, warns that remote tasks
+    /// won't survive quitting the app — process durability relies on dtach (see
+    /// remoteLaunch). Runs at most once per host per launch. The probe reuses
+    /// the tile's SSH ControlMaster connection (same ControlPath) so it doesn't
+    /// prompt for auth; a slight delay lets that master connection land first.
+    private func verifyRemoteDurability(host: String) {
+        guard durabilityCheckedHosts.insert(host).inserted else { return }
+        // ControlMaster=no: reuse the tiles' shared master if one is already up,
+        // but never create or replace it. (auto could race the tiles during
+        // restore and become a master without their -R forward.) A one-off
+        // throwaway connection when no master exists is fine for a probe.
+        var args = [
+            "-o", "BatchMode=yes",
+            "-o", "ControlMaster=no",
+            "-o", "ControlPath=/tmp/ptyparty-ssh-%C",
+        ]
+        if let key = sshKeyPath, !key.isEmpty {
+            args += ["-i", (key as NSString).expandingTildeInPath, "-o", "IdentitiesOnly=yes"]
+        }
+        args += [host, "command -v dtach >/dev/null 2>&1 && echo HAVE || echo MISSING"]
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) { [weak self] in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+            process.arguments = args
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = FileHandle.nullDevice
+            guard (try? process.run()) != nil else { return }
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            let out = String(data: data, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            DispatchQueue.main.async {
+                guard let self else { return }
+                switch out {
+                case "MISSING":
+                    self.presentDtachMissingAlert(host: host)
+                case "HAVE":
+                    break  // durable — nothing to do
+                default:
+                    // Couldn't connect/probe (auth, network). Inconclusive, so
+                    // clear the guard and let a later launch retry rather than
+                    // nag with a false alarm.
+                    self.durabilityCheckedHosts.remove(host)
+                }
+            }
+        }
+    }
+
+    /// Warns that `host` lacks `dtach`, so its remote tiles aren't durable, and
+    /// offers to copy a cross-distro install command to the clipboard.
+    private func presentDtachMissingAlert(host: String) {
+        let install = "sudo sh -c 'apt-get install -y dtach || dnf install -y dtach "
+            + "|| yum install -y dtach || apk add dtach || pacman -S --noconfirm dtach'"
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Remote tasks on \(host) won't survive quitting"
+        alert.informativeText = """
+            \(host) doesn't have dtach installed, so processes in its tiles run \
+            directly over SSH. If you quit pty.party or lose the connection, \
+            those processes are killed — a long-running task won't keep going.
+
+            Install dtach on the host to make remote tiles durable:
+
+              Debian/Ubuntu:  sudo apt-get install -y dtach
+              Fedora/RHEL:    sudo dnf install -y dtach
+              Alpine:         sudo apk add dtach
+              Arch:           sudo pacman -S dtach
+
+            Then reopen the remote tiles.
+            """
+        alert.addButton(withTitle: "Copy Install Command")
+        alert.addButton(withTitle: "Dismiss")
+        alert.beginSheetModal(for: window) { response in
+            guard response == .alertFirstButtonReturn else { return }
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(install, forType: .string)
+        }
     }
 
     /// Creates and installs a terminal tile (no process launched yet).
@@ -776,8 +893,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func installTerminalTile(_ tile: TerminalTileView) {
         let terminalID = tile.terminalID
-        tile.onClosed = { [weak self] in
+        tile.onClosed = { [weak self, weak tile] in
             self?.removeActivityFile(for: terminalID)
+            // Closing a remote tile tears down its dtach session so it doesn't
+            // orphan on the host (a session switch, which uses terminate(), is
+            // deliberately exempt so durable sessions survive to resume).
+            if let host = tile?.remoteHost {
+                self?.killRemoteDtach(terminalID: terminalID, host: host, key: tile?.remoteKeyPath)
+            }
             // After removal (next runloop turn): drop any edge glow this tile
             // was casting while off-screen, which no activity change clears.
             DispatchQueue.main.async {
