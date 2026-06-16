@@ -274,5 +274,13 @@ gives you a fast edit-build-run loop; for the MCP server, edit
 
 ## License
 
-No license has been chosen yet. Until one is added, the default of "all rights
-reserved" applies — open an issue if you'd like to use this in your own project.
+pty.party is released under the
+[PolyForm Noncommercial License 1.0.0](LICENSE). In plain English:
+
+- ✅ **Use it** — run pty.party for any noncommercial purpose, free of charge.
+- ✅ **Modify it** — fork it, change it, build on it, and share your changes.
+- ❌ **Don't sell it** — no commercial use. You may not sell pty.party, or a
+  product or service based on it, without a separate license.
+
+Want to use it commercially? [Get in touch](mailto:me@jacobford.co.uk). The
+full terms are in [LICENSE](LICENSE); this summary is not a substitute for it.
