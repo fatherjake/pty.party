@@ -13,8 +13,19 @@ final class WelcomeTileView: CanvasTileView {
     var onInstall: (() -> Void)?
     var onClosed: (() -> Void)?
 
+    /// One probed prerequisite, rendered as a live ✓/⚠/✗ row in the card.
+    struct Dependency {
+        let label: String
+        let found: Bool
+        /// Required deps show ✗ in red when missing; recommended ones show ⚠.
+        let required: Bool
+        /// Shown after the label when missing (e.g. an install command).
+        let hint: String?
+    }
+
     private let closeButton = NSButton(frame: .zero)
     private let stack = NSStackView()
+    private let depsStack = NSStackView()
     private let installButton = NSButton(frame: .zero)
     private var dragOffset = NSPoint.zero
 
@@ -75,16 +86,13 @@ final class WelcomeTileView: CanvasTileView {
         stack.addArrangedSubview(label(
             "YOU'LL NEED", font: Theme.mono(11, .semibold), color: Theme.textDim
         ))
-        for line in [
-            "macOS 13 or later",
-            "Node.js + npm — for the MCP server",
-            "the claude and/or codex CLI on your PATH",
-            "the ptyparty MCP server registered with your agent",
-        ] {
-            stack.addArrangedSubview(label(
-                "• \(line)", font: Theme.mono(12, .regular), color: Theme.textPrimary, wraps: true
-            ))
-        }
+        depsStack.orientation = .vertical
+        depsStack.alignment = .leading
+        depsStack.spacing = 6
+        stack.addArrangedSubview(depsStack)
+        depsStack.addArrangedSubview(label(
+            "Checking dependencies…", font: Theme.mono(12, .regular), color: Theme.textDim
+        ))
 
         stack.addArrangedSubview(label(
             "Set up the current project so agents read PARTY.md and the ptyparty skill, and so live tile status works via Claude Code hooks (Claude will ask once to trust them):",
@@ -98,6 +106,29 @@ final class WelcomeTileView: CanvasTileView {
         installButton.action = #selector(installClicked)
         installButton.keyEquivalent = "\r"
         stack.addArrangedSubview(installButton)
+    }
+
+    /// Renders the probed prerequisites as ✓/⚠/✗ rows. Called after a background
+    /// PATH probe, so it can replace the "Checking dependencies…" placeholder.
+    func setDependencies(_ deps: [Dependency]) {
+        depsStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        for dep in deps {
+            let glyph: String
+            let color: NSColor
+            if dep.found {
+                glyph = "✓"; color = Theme.green
+            } else if dep.required {
+                glyph = "✗"; color = Theme.red
+            } else {
+                glyph = "⚠"; color = Theme.amber
+            }
+            var text = "\(glyph) \(dep.label)"
+            if !dep.found, let hint = dep.hint { text += " — \(hint)" }
+            depsStack.addArrangedSubview(label(
+                text, font: Theme.mono(12, .regular),
+                color: dep.found ? Theme.textPrimary : color, wraps: true
+            ))
+        }
     }
 
     /// Swaps the card to its "setup complete" state, listing what's installed.

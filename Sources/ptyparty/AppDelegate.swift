@@ -6,6 +6,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var window: NSWindow!
     private var scrollView: NSScrollView!
     private var sessionBadge: SessionBadgeView!
+    private var zoomControl: ZoomControlView!
     private var canvas: CanvasView!
     private var edgeGlow: EdgeGlowView!
     private var cascadeCount = 0
@@ -144,8 +145,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         sessionBadge.onSelectHost = { [weak self] badge in self?.showHostMenu(from: badge) }
         sessionBadge.autoresizingMask = [.maxXMargin, .minYMargin]  // pin top-left
         container.addSubview(sessionBadge)
+
+        // A small zoom control pinned bottom-left, mirroring the badge's style.
+        zoomControl = ZoomControlView()
+        zoomControl.onZoomOut = { [weak self] in self?.zoomOut(nil) }
+        zoomControl.onZoomIn = { [weak self] in self?.zoomIn(nil) }
+        zoomControl.onReset = { [weak self] in self?.actualSize(nil) }
+        zoomControl.autoresizingMask = [.maxXMargin, .maxYMargin]  // pin bottom-left
+        container.addSubview(zoomControl)
+
         window.contentView = container
         positionSessionBadge()
+        positionZoomControl()
+        updateZoomControl()
 
         // The badge is the session indicator now, so drop the redundant
         // centered window title text (the window keeps its name for the OS).
@@ -169,7 +181,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Intercepts clicks to raise tiles, and option-drag to pan the canvas.
         let mask: NSEvent.EventTypeMask = [
             .leftMouseDown, .leftMouseDragged, .leftMouseUp,
-            .flagsChanged, .mouseMoved, .cursorUpdate, .keyDown,
+            .flagsChanged, .mouseMoved, .cursorUpdate, .keyDown, .scrollWheel,
         ]
         NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
             self?.handleCanvasEvent(event) ?? event
@@ -441,6 +453,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             setOptionHeld(event.modifierFlags.contains(.option))
             return event
 
+        case .scrollWheel:
+            // Option-scroll zooms the canvas, anchored under the cursor, the
+            // way it pans with option-drag. A bare scroll falls through to the
+            // scroll view's normal panning.
+            guard event.modifierFlags.contains(.option) else { return event }
+            let delta = event.hasPreciseScrollingDeltas
+                ? event.scrollingDeltaY
+                : event.scrollingDeltaY * 8
+            guard delta != 0 else { return nil }
+            let anchor = canvas.convert(event.locationInWindow, from: nil)
+            let target = scrollView.magnification * exp(delta * 0.004)
+            let clamped = min(max(target, scrollView.minMagnification), scrollView.maxMagnification)
+            scrollView.setMagnification(clamped, centeredAt: anchor)
+            updateZoomControl()
+            edgeGlow.refresh()
+            scheduleSessionSave()
+            return nil
+
         case .mouseMoved:
             if optionHeld { (isPanning ? NSCursor.closedHand : NSCursor.openHand).set() }
             return event
@@ -600,6 +630,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         fallbacks: ["~/.local/bin/codex", "/opt/homebrew/bin/codex", "/usr/local/bin/codex"]
     )
 
+    /// Absolute path of the dtach binary, which makes local tiles durable across
+    /// session switches (and app quits) the same way it does remote ones. nil
+    /// when dtach isn't installed — local tiles then run their program directly.
+    private lazy var localDtachPath: String? = Self.resolveCLIPath(
+        "dtach",
+        fallbacks: ["/opt/homebrew/bin/dtach", "/usr/local/bin/dtach"]
+    )
+
+    /// The dtach socket for a local tile. Kept short (under /tmp) to stay within
+    /// the AF_UNIX path limit; mirrors the remote naming, but on the Mac's own
+    /// filesystem rather than a host's, so the two never collide.
+    private func localDtachSocket(for terminalID: String) -> String {
+        "/tmp/ptyparty-\(terminalID).sock"
+    }
+
     // MARK: - Remote host (SSH)
 
     /// Unix socket the app listens on for RPC from remote MCP servers. Each
@@ -725,6 +770,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             process.standardError = FileHandle.nullDevice
             guard (try? process.run()) != nil else { return }
             process.waitUntilExit()
+        }
+    }
+
+    /// Kills the local dtach daemon for a closed local tile so its program
+    /// doesn't keep running orphaned, and drops the socket. Fires only on an
+    /// explicit tile close — a session switch uses terminate(), which merely
+    /// detaches and leaves the daemon alive to reattach.
+    private func killLocalDtach(terminalID: String) {
+        let socket = localDtachSocket(for: terminalID)
+        DispatchQueue.global(qos: .utility).async {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/bin/sh")
+            // The "[p]typarty" bracket keeps pkill from matching its own argv.
+            process.arguments = ["-c", "pkill -f '[p]typarty-\(terminalID)'"]
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            if (try? process.run()) != nil { process.waitUntilExit() }
+            try? FileManager.default.removeItem(atPath: socket)
         }
     }
 
@@ -893,13 +956,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func installTerminalTile(_ tile: TerminalTileView) {
         let terminalID = tile.terminalID
+        // Give every tile its dtach coordinates up front; local launches wrap
+        // themselves in dtach when these are set, and remote launches ignore
+        // them (they bring their own host-side dtach). nil path = no dtach.
+        tile.localDtachPath = localDtachPath
+        tile.localDtachSocket = localDtachSocket(for: terminalID)
         tile.onClosed = { [weak self, weak tile] in
             self?.removeActivityFile(for: terminalID)
-            // Closing a remote tile tears down its dtach session so it doesn't
-            // orphan on the host (a session switch, which uses terminate(), is
-            // deliberately exempt so durable sessions survive to resume).
+            // Closing a tile tears down its dtach session so it doesn't orphan
+            // a daemon (on the host for remote, on the Mac for local). A session
+            // switch uses terminate() instead, which only detaches — leaving the
+            // durable session alive to resume.
             if let host = tile?.remoteHost {
                 self?.killRemoteDtach(terminalID: terminalID, host: host, key: tile?.remoteKeyPath)
+            } else if tile?.localDtachPath != nil {
+                self?.killLocalDtach(terminalID: terminalID)
             }
             // After removal (next runloop turn): drop any edge glow this tile
             // was casting while off-screen, which no activity change clears.
@@ -955,12 +1026,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         tile.onInstall = { [weak self, weak tile] in self?.runProjectSetup(card: tile) }
         canvas.addSubview(tile)  // not persisted: no scheduleSessionSave()
 
+        // Probe prerequisites off the main thread (each check spawns a login
+        // shell), then fill in the card's live ✓/⚠/✗ dependency list.
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, weak tile] in
+            let deps = self?.probeDependencies() ?? []
+            DispatchQueue.main.async { tile?.setDependencies(deps) }
+        }
+
         // If the project is already set up, open straight into the done state.
         let target = workingDirectory
         if target != NSHomeDirectory() {
             let status = projectSetupStatus(in: target)
             if status.complete { tile.showComplete(status.lines) }
         }
+    }
+
+    /// Probes the prerequisites the Welcome card reports on. Runs off the main
+    /// thread — `resolveCLIPath` spawns a login shell per lookup. dtach is
+    /// "recommended" (tiles still work without it, just not durably); the rest
+    /// are required for the MCP server and agents to function.
+    private func probeDependencies() -> [WelcomeTileView.Dependency] {
+        func onPath(_ name: String) -> Bool { Self.resolveCLIPath(name, fallbacks: []) != nil }
+        let haveNode = onPath("node") && onPath("npm")
+        let haveAgent = claudePath != nil || codexPath != nil
+        let haveDtach = localDtachPath != nil
+        return [
+            .init(label: "Node.js + npm (MCP server)", found: haveNode,
+                  required: true, hint: "brew install node"),
+            .init(label: "claude and/or codex CLI", found: haveAgent,
+                  required: true, hint: "install the Claude Code or Codex CLI"),
+            .init(label: "dtach (keeps terminals running across session switches)",
+                  found: haveDtach, required: false, hint: "brew install dtach"),
+        ]
     }
 
     /// Installs the ptyparty skill + PARTY.md into the user's project and points
@@ -2122,6 +2219,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         scrollView.magnification = state.magnification
         scrollView.contentView.scroll(to: NSPoint(x: state.scrollX, y: state.scrollY))
         scrollView.reflectScrolledClipView(scrollView.contentView)
+        updateZoomControl()
         return true
     }
 
@@ -2192,6 +2290,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func setMagnification(_ value: CGFloat) {
         let center = visibleCenter()
         scrollView.setMagnification(value, centeredAt: center)
+        updateZoomControl()
+        edgeGlow?.refresh()
+        scheduleSessionSave()
+    }
+
+    /// Mirror the scroll view's current magnification onto the bottom-left
+    /// zoom control's percentage readout.
+    private func updateZoomControl() {
+        zoomControl?.magnification = scrollView.magnification
+    }
+
+    private func positionZoomControl() {
+        guard let zoomControl else { return }
+        zoomControl.sizeToFit()
+        let margin: CGFloat = 16
+        // Lift the control clear of the horizontal scroll bar's gutter so it
+        // isn't pressed right up against it. Overlay scrollers float over the
+        // content, so reserve their thickness regardless of the active style.
+        let scrollerInset = NSScroller.scrollerWidth(for: .regular, scrollerStyle: .overlay)
+        zoomControl.setFrameOrigin(NSPoint(x: margin, y: margin + scrollerInset))
     }
 
     // MARK: - Menu

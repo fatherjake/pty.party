@@ -23,9 +23,17 @@ final class TerminalTileView: CanvasTileView {
     /// connection stays readable rather than vanishing instantly.
     var keepOpenOnExit = false
 
-    /// Set when a remote tile launches; the first bytes back (dtach attached)
-    /// trigger a one-shot redraw nudge so the reattached screen repaints.
-    private var pendingRemoteRedraw = false
+    /// When set, local launches run under `dtach -A` at this socket so the
+    /// process survives a session switch (or app quit) and reattaches on
+    /// restore. nil means dtach is unavailable and the program runs directly —
+    /// the old, non-durable behavior. Set together by the AppDelegate.
+    var localDtachPath: String?
+    var localDtachSocket: String?
+
+    /// Set when a tile attaches to a dtach session (remote SSH, or a local
+    /// `dtach -A`); the first bytes back trigger a one-shot redraw nudge so the
+    /// reattached screen repaints (dtach keeps no screen buffer to replay).
+    private var pendingReattachRedraw = false
 
     /// SSH target this tile runs on when remote, so closing the tile can tear
     /// down its remote dtach session instead of orphaning it. nil for local.
@@ -168,13 +176,13 @@ final class TerminalTileView: CanvasTileView {
             guard let self else { return }
             self.lastOutputTime = ProcessInfo.processInfo.systemUptime
             self.needsRescan = true
-            // First bytes from a remote tile mean its dtach session is attached.
-            // dtach keeps no screen buffer, so nothing has repainted yet — nudge
-            // the PTY size to force a redraw (see nudgeRemoteRedraw).
-            if self.pendingRemoteRedraw {
-                self.pendingRemoteRedraw = false
+            // First bytes from a dtach tile mean its session is attached. dtach
+            // keeps no screen buffer, so nothing has repainted yet — nudge the
+            // PTY size to force a redraw (see nudgeReattachRedraw).
+            if self.pendingReattachRedraw {
+                self.pendingReattachRedraw = false
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-                    self?.nudgeRemoteRedraw()
+                    self?.nudgeReattachRedraw()
                 }
             }
         }
@@ -462,9 +470,16 @@ final class TerminalTileView: CanvasTileView {
     /// Starts the user's login shell in `directory`.
     func startShell(in directory: String) {
         let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
-        let execName = "-" + (shell as NSString).lastPathComponent
         startDirectory = directory
-        start(executable: shell, execName: execName, in: directory)
+        if let (exe, args) = dtachWrap(executable: shell, args: ["-l"]) {
+            // dtach can't replay the login "-zsh" argv0 trick, so pass an
+            // explicit -l login flag instead. The session survives a switch.
+            armReattachRedraw()
+            start(executable: exe, args: args, execName: nil, in: directory)
+        } else {
+            let execName = "-" + (shell as NSString).lastPathComponent
+            start(executable: shell, execName: execName, in: directory)
+        }
     }
 
     /// Runs a program directly as the tile's process (no shell underneath);
@@ -474,7 +489,34 @@ final class TerminalTileView: CanvasTileView {
         setTitle(name)
         launchedProgramName = name
         startDirectory = directory
-        start(executable: executable, args: args, execName: nil, in: directory)
+        if let (exe, wrapped) = dtachWrap(executable: executable, args: args) {
+            armReattachRedraw()
+            start(executable: exe, args: wrapped, execName: nil, in: directory)
+        } else {
+            start(executable: executable, args: args, execName: nil, in: directory)
+        }
+    }
+
+    /// Wraps a local launch in `dtach -A` when durability is enabled, returning
+    /// nil when it isn't (the caller then runs the program directly). The socket
+    /// is keyed by tile id, so relaunching with the same id reattaches the live
+    /// session — `dtach -A` ignores the command when the session already exists.
+    private func dtachWrap(executable: String, args: [String])
+        -> (executable: String, args: [String])?
+    {
+        guard let dtach = localDtachPath, let sock = localDtachSocket else { return nil }
+        return (dtach, ["-A", sock, "-r", "winch", executable] + args)
+    }
+
+    /// Arms the one-shot redraw nudge for a dtach attach (remote or local),
+    /// with a timed fallback in case the reattached program emits nothing.
+    private func armReattachRedraw() {
+        pendingReattachRedraw = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) { [weak self] in
+            guard let self, self.pendingReattachRedraw else { return }
+            self.pendingReattachRedraw = false
+            self.nudgeReattachRedraw()
+        }
     }
 
     /// Launches a remote tile: the real process is `ssh`, but `program` records
@@ -487,19 +529,11 @@ final class TerminalTileView: CanvasTileView {
         launchedProgramName = program
         startDirectory = directory
         keepOpenOnExit = true
-        pendingRemoteRedraw = true
+        armReattachRedraw()
         start(executable: executable, args: args, execName: nil, in: directory)
-        // Fallback: a reattached program that emits nothing on attach never
-        // fires onData, so nudge anyway once the connection has had time to
-        // settle. Whichever path runs first clears pendingRemoteRedraw.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) { [weak self] in
-            guard let self, self.pendingRemoteRedraw else { return }
-            self.pendingRemoteRedraw = false
-            self.nudgeRemoteRedraw()
-        }
     }
 
-    /// Forces the reattached remote program to repaint. dtach keeps no screen
+    /// Forces a reattached dtach program to repaint. dtach keeps no screen
     /// buffer, so on reattach a SIGWINCH with an *unchanged* size often leaves
     /// claude/zsh blank. Briefly shrinking the tile by one cell row and
     /// restoring it sends a genuine size change, which triggers a full redraw.
@@ -508,7 +542,7 @@ final class TerminalTileView: CanvasTileView {
     /// SwiftTerm's logical size directly — poking the logical rows/cols while the
     /// view frame disagrees leaves the terminal geometry out of sync and wedges
     /// the canvas until the next layout.
-    private func nudgeRemoteRedraw() {
+    private func nudgeReattachRedraw() {
         // Skip if the tile has been detached (e.g. a session switch tore it down
         // before this fired) — resizing a stray view only causes trouble.
         guard superview != nil else { return }
@@ -558,8 +592,11 @@ final class TerminalTileView: CanvasTileView {
         removeFromSuperview()
     }
 
-    /// Kills the child process. Used when clearing the canvas to switch
-    /// sessions, where the delegate callbacks are intentionally bypassed.
+    /// Kills the foreground child process. Used when clearing the canvas to
+    /// switch sessions, where the delegate callbacks are intentionally bypassed.
+    /// For a dtach tile (local or remote) this only kills the attaching client,
+    /// so the detached daemon keeps the real program alive to reattach on
+    /// restore; without dtach it ends the process outright (the old behavior).
     func terminate() {
         activityTimer?.invalidate()
         terminal.terminate()
