@@ -68,10 +68,15 @@ function focus(ids, { animate = true, maxScale = 1.05 } = {}) {
   const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
 
   const vw = window.innerWidth, vh = window.innerHeight;
-  const usableTop = 84, usableBottom = vh - 168;          // leave room for caption
-  const usableH = Math.max(220, usableBottom - usableTop);
-  const usableW = vw - 220;
-  const s = Math.min(usableW / bw, usableH / bh, maxScale);
+  // On phones, use tighter margins and a slightly higher zoom cap so tiles
+  // don't read as tiny on a narrow screen.
+  const mobile = vw < 700;
+  const sideMargin = mobile ? 20 : 110;
+  const usableTop = mobile ? 70 : 84;
+  const usableBottom = vh - (mobile ? 150 : 168);         // leave room for caption
+  const usableH = Math.max(200, usableBottom - usableTop);
+  const usableW = vw - sideMargin * 2;
+  const s = Math.min(usableW / bw, usableH / bh, maxScale * (mobile ? 1.15 : 1));
   const targetCx = vw / 2;
   const targetCy = usableTop + usableH / 2;
 

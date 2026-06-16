@@ -338,3 +338,24 @@ html, body {
   .world { transition: none; }
   .status.asking .dot, .edge-glow.on { animation: none; }
 }
+
+/* ---- Mobile: trim the header to logo + wordmark, shrink the CTA --------- */
+@media (max-width: 640px) {
+  .badge {
+    top: 14px; left: 14px; height: 40px; padding: 0 12px;
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.32);
+  }
+  .badge .glyph { width: 24px; height: 24px; margin-right: 9px; }
+  .badge .word { font-size: 14px; }
+  /* drop the "/ session ▾  Local ▾" segment — keep just the logo + wordmark */
+  .badge .slash, .badge .sess, .badge .host, .badge .chev { display: none; }
+
+  .cta { top: 16px; right: 14px; gap: 8px; }
+  .cta a { padding: 7px 11px; font-size: 12px; }
+  .dl-rest { display: none; }
+
+  .lower { padding: 70px 0 64px; }
+  .lower .headline { letter-spacing: -0.4px; }
+  .controls { bottom: 12px; }
+  .track-bar { width: 150px; }
+}
