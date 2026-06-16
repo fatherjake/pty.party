@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>pty.party — an infinite canvas for your terminals</title>
+  <meta name="description" content="Wire terminals, notes and images together on one infinite canvas. Run agents side by side and watch the work happen." />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 28 28'%3E%3Crect width='28' height='28' rx='8' fill='%237de28c'/%3E%3Crect x='6' y='6' width='16' height='16' rx='3' fill='none' stroke='%230b0d0b' stroke-width='2'/%3E%3Crect x='6' y='6' width='6.4' height='16' rx='2' fill='%230b0d0b'/%3E%3C/svg%3E" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="viewport" id="viewport">
+    <div class="grid" id="grid"></div>
+    <div class="world" id="world">
+      <svg class="wires" id="wires" viewBox="0 0 4200 1900" preserveAspectRatio="none"></svg>
+      <!-- tiles are injected here by app.js -->
+    </div>
+  </div>
+
+  <div class="edge-glow" id="edgeGlow"></div>
+
+  <!-- marketing chrome — header mirrors the app's SessionBadgeView pill -->
+  <div class="badge">
+    <svg class="glyph" viewBox="0 0 28 28" aria-hidden="true">
+      <rect width="28" height="28" rx="8" fill="#7de28c"/>
+      <rect x="6" y="6" width="16" height="16" rx="3" fill="none" stroke="#0b0d0b" stroke-width="2"/>
+      <rect x="6" y="6" width="6.4" height="16" rx="2" fill="#0b0d0b"/>
+    </svg>
+    <span class="word">pty.party</span>
+    <span class="slash">/</span>
+    <span class="sess">launch-party</span>
+    <span class="chev">▾</span>
+    <span class="host">Local</span>
+    <span class="chev">▾</span>
+  </div>
+  <nav class="cta">
+    <a href="https://github.com/fatherjake/pty.party" target="_blank" rel="noopener">GitHub</a>
+    <a class="primary" href="https://github.com/fatherjake/pty.party/releases/latest/download/pty.party.zip">Download for Mac</a>
+  </nav>
+
+  <div class="lower">
+    <div class="headline">One canvas. <span class="accent">Every terminal.</span></div>
+    <p class="caption" id="caption">Watch a build come together — terminals, a Log, an image, and agents working side by side.</p>
+  </div>
+
+  <div class="controls">
+    <div class="track-bar"><div class="bar" id="progress"></div></div>
+    <button class="replay" id="replay">⟳ replay</button>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>
