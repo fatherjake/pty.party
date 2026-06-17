@@ -14,3 +14,9 @@ node_modules/
 # Xcode
 *.xcodeproj
 .swiftpm/
+
+# Release artifact (uploaded to GitHub Releases, not tracked)
+pty.party.zip
+
+# Local MCP config — contains secret API tokens
+.mcp.json

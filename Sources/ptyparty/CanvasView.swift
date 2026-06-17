@@ -368,46 +368,20 @@ final class CanvasView: NSView {
 
     // MARK: - Context menu
 
-    override func menu(for event: NSEvent) -> NSMenu? {
-        contextMenuPoint = convert(event.locationInWindow, from: nil)
-        let menu = NSMenu()
-        let claudeItem = NSMenuItem(title: "New Claude", action: #selector(contextAddClaude), keyEquivalent: "")
-        claudeItem.target = self
-        menu.addItem(claudeItem)
-        let codexItem = NSMenuItem(title: "New Codex", action: #selector(contextAddCodex), keyEquivalent: "")
-        codexItem.target = self
-        menu.addItem(codexItem)
-        let shellItem = NSMenuItem(title: "New Terminal", action: #selector(contextAddShell), keyEquivalent: "")
-        shellItem.target = self
-        menu.addItem(shellItem)
-        let runnerItem = NSMenuItem(title: "New Command Runner", action: #selector(contextAddCommandRunner), keyEquivalent: "")
-        runnerItem.target = self
-        menu.addItem(runnerItem)
-        menu.addItem(.separator())
-        let logItem = NSMenuItem(title: "New Log", action: #selector(contextAddLog), keyEquivalent: "")
-        logItem.target = self
-        menu.addItem(logItem)
-        return menu
-    }
-
-    @objc private func contextAddLog() {
-        onAddLog?(contextMenuPoint)
-    }
-
-    @objc private func contextAddCommandRunner() {
-        onAddCommandRunner?(contextMenuPoint)
-    }
-
-    @objc private func contextAddClaude() {
-        onAddClaude?(contextMenuPoint)
-    }
-
-    @objc private func contextAddCodex() {
-        onAddCodex?(contextMenuPoint)
-    }
-
-    @objc private func contextAddShell() {
-        onAddShell?(contextMenuPoint)
+    override func rightMouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        contextMenuPoint = point
+        let items: [ThemedMenu.Item] = [
+            .item("New Claude") { [weak self] in self.map { $0.onAddClaude?($0.contextMenuPoint) } },
+            .item("New Codex") { [weak self] in self.map { $0.onAddCodex?($0.contextMenuPoint) } },
+            .item("New Terminal") { [weak self] in self.map { $0.onAddShell?($0.contextMenuPoint) } },
+            .item("New Command Runner") { [weak self] in
+                self.map { $0.onAddCommandRunner?($0.contextMenuPoint) }
+            },
+            .separator,
+            .item("New Log") { [weak self] in self.map { $0.onAddLog?($0.contextMenuPoint) } },
+        ]
+        ThemedMenu(items: items).show(at: point, in: self)
     }
 
     // MARK: - Image drops

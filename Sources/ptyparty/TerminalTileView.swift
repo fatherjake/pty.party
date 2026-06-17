@@ -560,11 +560,41 @@ final class TerminalTileView: CanvasTileView {
         }
     }
 
+    /// PATH from an interactive login shell, resolved once. Local tiles inherit
+    /// the app's launchd environment, whose PATH omits version managers like
+    /// nvm/pyenv — so an npm-installed CLI (e.g. `codex`, a `#!/usr/bin/env
+    /// node` script) launches but instantly dies because its interpreter isn't
+    /// found. Splicing the login PATH into the child env fixes that without
+    /// routing every launch through a shell. nil if the probe yields nothing.
+    private static let loginShellPATH: String? = {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        process.arguments = ["-lic", "printf %s \"$PATH\""]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        try? process.run()
+        process.waitUntilExit()
+        let out = String(
+            data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8
+        )?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (out?.isEmpty == false) ? out : nil
+    }()
+
     private func start(executable: String, args: [String] = [], execName: String?, in directory: String) {
         var env = ProcessInfo.processInfo.environment
         env["TERM"] = "xterm-256color"
         env["COLORTERM"] = "truecolor"
         env["PTYPARTY_TERMINAL_ID"] = terminalID
+        // Prefer the login shell's PATH so npm/nvm/pyenv-installed CLIs (and the
+        // interpreters they shell out to) resolve; keep any app-only entries as
+        // a fallback tail.
+        if let loginPATH = Self.loginShellPATH {
+            var merged = loginPATH.split(separator: ":").map(String.init)
+            let existing = env["PATH"]?.split(separator: ":").map(String.init) ?? []
+            for dir in existing where !merged.contains(dir) { merged.append(dir) }
+            env["PATH"] = merged.joined(separator: ":")
+        }
         // Don't leak session state when pty.party itself was launched from a
         // Claude Code session — a nested claude should start fresh.
         for key in env.keys where key.hasPrefix("CLAUDE") {

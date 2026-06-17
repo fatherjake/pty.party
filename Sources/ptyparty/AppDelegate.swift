@@ -1646,62 +1646,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Pops up the session switcher under the badge: every session, with the
     /// current one checked, plus new/rename actions.
     private func showSessionMenu(from badge: SessionBadgeView) {
-        let menu = NSMenu()
-        for info in SessionStore.list() {
-            let item = NSMenuItem(
-                title: info.name,
-                action: #selector(switchToSessionMenuItem(_:)),
-                keyEquivalent: ""
-            )
-            item.target = self
-            item.representedObject = info.id
-            item.state = (info.id == currentSession?.id) ? .on : .off
-            menu.addItem(item)
+        var items: [ThemedMenu.Item] = SessionStore.list().map { info in
+            .item(info.name, checked: info.id == currentSession?.id) { [weak self] in
+                self?.switchTo(info)
+            }
         }
-        menu.addItem(.separator())
-        let newItem = NSMenuItem(title: "New Session…", action: #selector(newSession(_:)), keyEquivalent: "")
-        newItem.target = self
-        menu.addItem(newItem)
-        let renameItem = NSMenuItem(title: "Rename Session…", action: #selector(renameSession(_:)), keyEquivalent: "")
-        renameItem.target = self
-        menu.addItem(renameItem)
-        let deleteItem = NSMenuItem(title: "Delete Session…", action: #selector(deleteSession(_:)), keyEquivalent: "")
-        deleteItem.target = self
-        menu.addItem(deleteItem)
+        items.append(.separator)
+        items.append(.item("New Session…") { [weak self] in self?.newSession(nil) })
+        items.append(.item("Rename Session…") { [weak self] in self?.renameSession(nil) })
+        items.append(.item("Delete Session…") { [weak self] in self?.deleteSession(nil) })
         // Anchor just below the session name.
-        menu.popUp(positioning: nil, at: NSPoint(x: badge.nameSegmentMinX, y: -4), in: badge)
+        ThemedMenu(items: items).show(at: NSPoint(x: badge.nameSegmentMinX, y: -4), in: badge)
     }
 
     /// Pops up the host menu under the badge's host segment: a quick "Local"
     /// toggle plus the host / remote-folder editors.
     private func showHostMenu(from badge: SessionBadgeView) {
         let remote = sessionHost.map { !$0.isEmpty } ?? false
-        let menu = NSMenu()
-        menu.autoenablesItems = false  // honor folderItem.isEnabled below
-
-        let localItem = NSMenuItem(title: "Local", action: #selector(setLocalHost(_:)), keyEquivalent: "")
-        localItem.target = self
-        localItem.state = remote ? .off : .on
-        menu.addItem(localItem)
-        menu.addItem(.separator())
-
-        let hostItem = NSMenuItem(title: "Set Session Host…", action: #selector(chooseSessionHost(_:)), keyEquivalent: "")
-        hostItem.target = self
-        menu.addItem(hostItem)
-
-        let folderItem = NSMenuItem(title: "Set Remote Folder…", action: #selector(chooseWorkingDirectory(_:)), keyEquivalent: "")
-        folderItem.target = self
-        folderItem.isEnabled = remote
-        menu.addItem(folderItem)
-
-        menu.addItem(.separator())
-        let logItem = NSMenuItem(title: "Set Up Remote Log…", action: #selector(setUpRemoteLog(_:)), keyEquivalent: "")
-        logItem.target = self
-        logItem.isEnabled = remote
-        menu.addItem(logItem)
-
+        let items: [ThemedMenu.Item] = [
+            .item("Local", checked: !remote) { [weak self] in self?.setLocalHost(nil) },
+            .separator,
+            .item("Set Session Host…") { [weak self] in self?.chooseSessionHost(nil) },
+            .item("Set Remote Folder…", enabled: remote) { [weak self] in
+                self?.chooseWorkingDirectory(nil)
+            },
+            .separator,
+            .item("Set Up Remote Log…", enabled: remote) { [weak self] in
+                self?.setUpRemoteLog(nil)
+            },
+        ]
         // Anchor just below the host segment.
-        menu.popUp(positioning: nil, at: NSPoint(x: badge.hostSegmentMinX, y: -4), in: badge)
+        ThemedMenu(items: items).show(at: NSPoint(x: badge.hostSegmentMinX, y: -4), in: badge)
     }
 
     /// Clears the session host, returning new tiles to running locally.
@@ -1794,13 +1769,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 + (output.isEmpty ? "No output." : output)
         }
         alert.beginSheetModal(for: window)
-    }
-
-    @objc private func switchToSessionMenuItem(_ sender: NSMenuItem) {
-        guard let id = sender.representedObject as? String,
-              let info = SessionStore.list().first(where: { $0.id == id })
-        else { return }
-        switchTo(info)
     }
 
     @objc func newSession(_ sender: Any?) {
